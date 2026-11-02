@@ -148,10 +148,10 @@ https://你的项目ID.supabase.co/rest/v1/erp_doc?select=id
 > `xxx.pages.dev` 是通的（实测可访问）。所以请认准 **Pages**，网址结尾是 **`.pages.dev`**。  
 > 万一建成了 Worker，别慌，也不用删：回到 Workers & Pages 列表，重新点 Create 走一遍 Pages 就行。
 
-### 你要上传的文件夹：已经在桌面准备好了
+### 你要上传的文件夹：`网页上传包`
 
 ```
-C:\Users\31787\Desktop\erp-web\
+网页上传包\
     ├── index.html              ← 账本本体（已改好名，别动）
     ├── manifest.webmanifest    ← 让手机能"添加到主屏幕"
     ├── sw.js                   ← 断网也能打开

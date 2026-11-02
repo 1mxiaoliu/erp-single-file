@@ -720,7 +720,7 @@
         <div class="h"><div class="t">谨慎操作</div></div>
         <div style="font-size:12.5px;line-height:1.8;color:var(--ink-2);margin-bottom:14px">下面两个按钮都会删除数据，且不能撤销。操作前建议先到「备份恢复」导出一份。</div>
         <button class="btn line block" style="margin-bottom:10px;color:#d92d20;border-color:#fbd9d5" onclick="clearAllGoods()">清空全部商品</button>
-        <button class="btn danger block" onclick="resetData()">清空并恢复演示数据</button>
+        <button class="btn danger block" onclick="resetData()">清空全部数据 / 重新开始</button>
       </div>
     </section>
 
@@ -1131,23 +1131,75 @@ function money(n){ return '¥'+(n||0).toLocaleString('zh-CN',{maximumFractionDig
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function n0(n){ return (n||0).toLocaleString('zh-CN'); }
 
+/* 演示数据：默认不加载，第一次打开就是一本干净的空账本。
+   想在电脑上先看效果，网址后面加 ?demo=1 即可（如 xxx.pages.dev/?demo=1）
+   注意用函数而不是 const：首次加载时 seed() 会被 load() 提前调用，const 那时还没初始化 */
+function isDemo(){ return /[?&]demo=1/.test(location.search); }
 function seed(){
-  const w1=uid('w'), w2=uid('w'), s1=uid('s'), c1=uid('c');
+  const w1=uid('w');
   const cats=['办公用品','数码配件','食品饮料','日用百货'];
-  const demo=[['A4复印纸','包',25,32],['无线鼠标','个',35,49],['机械键盘','个',120,169],['矿泉水24瓶','箱',28,38],['中性笔','盒',9,15],['U盘 64G','个',39,55],['抽纸','提',18,25],['便利贴','本',4,8]];
-  const g=[];
-  demo.forEach((d,i)=>{
-    const id=uid('g'), stock={};
-    stock[w1]=Math.floor(Math.random()*40+5); stock[w2]=Math.floor(Math.random()*20);
-    g.push({id, code:'P'+String(1001+i), name:d[0], cat:cats[i%4], unit:d[1], spec:'', brand:'', barcode:'', note:'', buy:d[2], sale:d[3], warn:10, stock});
-  });
-  return {warehouses:[{id:w1,name:'总仓',addr:''},{id:w2,name:'门店仓',addr:''}],
-    suppliers:[{id:s1,name:'晨光文具批发',contact:'王经理',phone:'13800000001'}],
-    customers:[{id:c1,name:'零售客户',contact:'',phone:''}],
-    goods:g, purchase:[], sale:[], flow:[], invoices:[],
+  const base={warehouses:[{id:w1,name:'总仓',addr:''}],
+    suppliers:[], customers:[],
+    goods:[], purchase:[], sale:[], flow:[], invoices:[],
     categories:cats.slice(),
     priceMemo:{}, priceMemoTs:{},
     company:{name:'我的公司', sub:'', docTitle:'送货单（结账单）', addr:'', phone:'', web:'', sender:'', card:'', holder:''}};
+  if(!isDemo()) return base;
+
+  const w2=uid('w'), s1=uid('s'), c1=uid('c');
+  const demo=[['A4复印纸','包',25,32],['无线鼠标','个',35,49],['机械键盘','个',120,169],['矿泉水24瓶','箱',28,38],['中性笔','盒',9,15],['U盘 64G','个',39,55],['抽纸','提',18,25],['便利贴','本',4,8]];
+  base.warehouses.push({id:w2,name:'门店仓',addr:''});
+  base.suppliers.push({id:s1,name:'晨光文具批发',contact:'王经理',phone:'13800000001'});
+  base.customers.push({id:c1,name:'零售客户',contact:'',phone:''});
+  demo.forEach((d,i)=>{
+    const id=uid('g'), stock={};
+    stock[w1]=0; stock[w2]=0;
+    base.goods.push({id, code:'P'+String(1001+i), name:d[0], cat:cats[i%4], unit:d[1], spec:'', brand:'', barcode:'', note:'', buy:d[2], sale:d[3], warn:10, stock});
+  });
+
+  /* ---------- 演示单据：让工作台 / 报表 / 单据列表都有内容 ---------- */
+  const dAgo=n=>{ const d=new Date(); d.setDate(d.getDate()-n); return d.toISOString().slice(0,10); };
+  let sq=0;
+  const mkOrder=(isSale,days,partner,lines)=>{
+    const date=dAgo(days), ts=Date.now()-days*864e5;
+    const no=(isSale?'XS':'JH')+date.replace(/-/g,'').slice(2)+String(++sq).padStart(2,'0');
+    const items=lines.map(([gi,q])=>{
+      const g=base.goods[gi];
+      return {goodsId:g.id, qty:q, price:isSale?(g.sale||g.buy||0):(g.buy||0)};
+    });
+    const total=items.reduce((a,it)=>a+it.qty*it.price,0);
+    items.forEach(it=>{
+      const g=base.goods.find(x=>x.id===it.goodsId);
+      g.stock[w1]=Math.max(0,(g.stock[w1]||0)+(isSale?-it.qty:it.qty));
+      base.flow.push({id:uid('f'),type:isSale?'out':'in',goodsId:it.goodsId,goodsName:g.name,wh:w1,qty:it.qty,date,ts,orderNo:no});
+    });
+    (isSale?base.sale:base.purchase).push({
+      id:uid(isSale?'x':'j'), no, date, month:date.slice(0,7), ts, wh:w1,
+      partnerId:partner.id, partnerName:partner.name, items, total, remark:''
+    });
+  };
+  /* 进货排在销售之前，保证演示账本不会出现负库存；总量刻意控制到「销售略高于进货」，
+     这样报表里的毛利是正数，库存也不会堆成一片大红 */
+  mkOrder(false,26,s1,[[0,20],[1,18],[2,8],[3,30]]);
+  mkOrder(false,17,s1,[[4,40],[5,15],[6,25]]);
+  mkOrder(false,1,s1,[[7,50],[0,15],[2,6]]);
+  /* 0 天和 1 天前这两单落在本月，工作台「本月销售额」才有数 */
+  mkOrder(true,0,c1,[[1,6],[4,10],[7,8]]);
+  mkOrder(true,1,c1,[[0,7],[5,4]]);
+  mkOrder(true,3,c1,[[2,3]]);
+  mkOrder(true,5,c1,[[3,4]]);
+  mkOrder(true,7,c1,[[6,8],[4,9]]);
+  mkOrder(true,9,c1,[[1,5],[0,6]]);
+  mkOrder(true,12,c1,[[5,5],[2,4]]);
+  mkOrder(true,15,c1,[[7,20]]);
+  mkOrder(true,18,c1,[[4,8],[6,6]]);
+  mkOrder(true,21,c1,[[0,9],[3,8]]);
+  mkOrder(true,24,c1,[[1,5],[2,3]]);
+  mkOrder(true,26,c1,[[5,3]]);
+  mkOrder(true,28,c1,[[6,6],[4,6]]);
+  mkOrder(true,31,c1,[[3,4],[7,10]]);
+  mkOrder(true,34,c1,[[2,2],[7,2]]);
+  return base;
 }
 
 /* ================= 图标 ================= */
@@ -2060,8 +2112,44 @@ function viewOrder(type,id){
     <button class="btn line" onclick="editOrder('${isSale?'sale':'purchase'}','${o.id}')">修改价格 / 数量</button>
     <button class="btn line" onclick="printOrderDoc('${isSale?'sale':'purchase'}','${o.id}')">打印${isSale?'送货单':'入库单'}</button>
     ${isSale?`<button class="btn" onclick="closeSheet();openSheet('invoice','${o.id}')">开具发票</button>`:''}
+  </div>
+  <div class="actions-line" style="margin-top:10px">
+    <button class="btn line" style="color:#d92d20;border-color:#fbd9d5" onclick="delOrder('${isSale?'sale':'purchase'}','${o.id}')">${ic('trash')}删除此单</button>
   </div>`;
   document.getElementById('mask').classList.add('show');
+}
+/* 删除单据：把库存改回原样、清掉流水、连带的发票一起删，避免账实不符 */
+function delOrder(type,id){
+  const isSale=type==='sale';
+  const o=(isSale?DB.sale:DB.purchase).find(x=>x.id===id); if(!o) return;
+  const inv=(DB.invoices||[]).filter(v=>v.orderId===id);
+  const msg='确认删除这张'+(isSale?'销售单':'进货单')+'？\n\n'
+    +'单号：'+(o.no||'—')+'\n'
+    +'金额：'+money(o.total)+'\n'
+    +(inv.length?('\n⚠️ 这张单已开 '+inv.length+' 张发票，删除时发票会一起删除。\n'):'')
+    +'\n删除后：\n'
+    +'· 这个单从列表里消失\n'
+    +'· 相关商品的库存会回退（'+(isSale?'加回来':'扣回去')+'）\n'
+    +'· 不能撤销；想留底请先在「备份恢复」导出';
+  if(!confirm(msg)) return;
+  /* 1) 回退库存：销售删掉=货回来，进货删掉=货扣回去（不低于 0） */
+  (o.items||[]).forEach(it=>{
+    const g=goodById(it.goodsId); if(!g) return;
+    g.stock=g.stock||{};
+    const cur=+g.stock[o.wh]||0;
+    g.stock[o.wh]=Math.max(0, cur + (isSale ? (+it.qty||0) : -(+it.qty||0)));
+  });
+  /* 2) 清掉这张单产生的库存流水 */
+  if(o.no) DB.flow=(DB.flow||[]).filter(f=>f.orderNo!==o.no);
+  /* 3) 连带删掉关联发票 */
+  if(inv.length) DB.invoices=(DB.invoices||[]).filter(v=>v.orderId!==id);
+  /* 4) 移除单据本身 */
+  if(isSale) DB.sale=DB.sale.filter(x=>x.id!==id);
+  else DB.purchase=DB.purchase.filter(x=>x.id!==id);
+  save(); closeSheet();
+  isSale?renderSale():renderPurchase();
+  try{ if(curView==='v-home') renderHome(); }catch(e){}
+  toast('已删除'+(inv.length?' · 发票也一并删了':'')+' · 库存已回退');
 }
 /* ===== 已保存单据改价（改完库存与合计一起更正） ===== */
 let editCtx=null;
@@ -2637,12 +2725,12 @@ function exportData(){
   try{ localStorage.setItem(KEY+'_exp_time', now()+' '+stamp()); }catch(e){}
   toast('已导出备份文件');
 }
-function importData(input){ const f=input.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>{ try{ const d=JSON.parse(r.result); if(!d.goods){ toast('文件格式错误'); return; } DB=d; flush(); toast('恢复成功'); setTimeout(()=>location.reload(),700); }catch(e){ toast('解析失败'); } }; r.readAsText(f); input.value=''; }
+function importData(input){ const f=input.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>{ try{ const d=JSON.parse(r.result); if(!d.goods){ toast('文件格式错误'); return; } baseIdsClear(); DB=d; flush(); toast('恢复成功'); setTimeout(()=>location.reload(),700); }catch(e){ toast('解析失败'); } }; r.readAsText(f); input.value=''; }
 function clearAllImgs(){
   Object.keys(IMGCACHE).forEach(gid=>imgDel(gid));
   try{ Object.keys(localStorage).forEach(k=>{ if(k.indexOf(IMG_PREFIX)===0) localStorage.removeItem(k); }); }catch(e){}
 }
-function resetData(){ if(!confirm('将清空所有数据并恢复演示数据，确认？')) return; clearAllImgs(); localStorage.removeItem(KEY); localStorage.removeItem(BAK_KEY); DB=seed(); flush(); toast('已重置'); setTimeout(()=>location.reload(),600); }
+function resetData(){ if(!confirm('将清空全部数据（商品、单据、往来单位、库存），重新开始。确认？')) return; clearAllImgs(); localStorage.removeItem(KEY); localStorage.removeItem(BAK_KEY); baseIdsClear(); DB=seed(); flush(); toast('已重置'); setTimeout(()=>location.reload(),600); }
 
 /* ================= 多端同步（可选） =================
    有服务端（NAS / 云主机）时自动启用：打开拉最新、保存即上传、断网排队补传。
@@ -2677,7 +2765,13 @@ async function cloudPut(ver, db){
   });
   if(!r.ok) throw {code:r.status, body:await r.text()};
   const a=await r.json();
-  if(!a || !a.length) return {conflict:true};   // 版本对不上：别人先写了
+  if(!a || !a.length){
+    /* 版本对不上：别人先写了。把云端最新那份一并带回，上层才能合并后重试；
+       不带回就直接合并，等于拿"空数据"去合并，会把本地账本清掉 */
+    let cur=null;
+    try{ cur=await cloudGet(); }catch(e){}
+    return {conflict:{ver:(cur&&cur.ver)||0, db:(cur&&cur.db)||null}};
+  }
   return {ver:+a[0].ver};
 }
 /* 统一入口：云端优先，其次自建服务端 */
@@ -2753,16 +2847,47 @@ function doLogout(){
   if(!confirm('退出登录？本机已下载的数据仍保留，下次登录后可继续同步。')) return;
   location.href='/api/logout';
 }
-/* 合并两台设备的数据：服务器为准，本地独有的记录保留，避免把对方的单子冲掉 */
+/* 合并两台设备的数据：远端为底，本地新增的补充进来；任一处删掉的按删除处理 */
+/* 基线：上次同步成功时各集合的 id 清单，用来分辨"删掉了"和"新增的"
+   只存 id 不存内容，几十条也就几 KB，换来的能力是——删除也能同步 */
+const BASE_KEY='erp_sync_ids';
+let _mergeDropped=false;                  // 本轮合并是否因"别处删过"而丢掉了本地数据（需要反推回云端）
+function baseIdsGet(){ try{ return JSON.parse(localStorage.getItem(BASE_KEY)||'null'); }catch(e){ return null; } }
+function baseIdsSet(db){
+  try{
+    const o={};
+    ID_KEYS.forEach(k=>{ o[k]=((db&&db[k])||[]).map(x=>x&&x.id).filter(Boolean); });
+    localStorage.setItem(BASE_KEY, JSON.stringify(o));
+  }catch(e){}
+}
+function baseIdsClear(){ try{ localStorage.removeItem(BASE_KEY); }catch(e){} }
+
 function mergeDb(local, remote){
   const out=JSON.parse(JSON.stringify(remote||{}));
+  const base=baseIdsGet();
+  _mergeDropped=false;
   ID_KEYS.forEach(k=>{
     const A=(local&&local[k]), B=out[k];
     if(!A && !B) return;                 // 两边都没有这个集合，别凭空造一个空数组（会让两端内容永远对不上）
     const a=Array.isArray(A)?A:[], b=Array.isArray(B)?B:[];
-    const seen=new Set(b.map(x=>x&&x.id));
-    const extra=a.filter(x=>x&&x.id&&!seen.has(x.id));
-    out[k]=extra.concat(b);
+    const aIds=new Set(a.map(x=>x&&x.id)), bIds=new Set(b.map(x=>x&&x.id));
+    const baseArr=(base && Array.isArray(base[k])) ? base[k] : null;
+    const baseSet=new Set(baseArr||[]);
+    /* 只把"本地新增的（上次同步时还没有）"并进来。
+       上次同步时就存在、但现在远端没有的，说明是另一台删掉了 → 不能从本地补回去，否则删了会复活 */
+    let extra=a.filter(x=>x&&x.id&&!bIds.has(x.id)&&!baseSet.has(x.id));
+    let merged=extra.concat(b);
+    if(baseArr){
+      /* 任一设备删掉的 id（本机删的 / 远端删的）统一按"已删除"处理，删除优先于保留 */
+      const gone=new Set();
+      baseSet.forEach(id=>{ if(!aIds.has(id)||!bIds.has(id)) gone.add(id); });
+      if(gone.size){
+        const before=merged.length;
+        merged=merged.filter(x=>!(x&&gone.has(x.id)));
+        if(merged.length!==before) _mergeDropped=true;
+      }
+    }
+    out[k]=merged;
   });
   ['priceMemo','priceMemoTs'].forEach(k=>{ out[k]=Object.assign({}, (remote&&remote[k])||{}, (local&&local[k])||{}); });
   out.categories=[...new Set([...((remote&&remote.categories)||[]), ...((local&&local.categories)||[])])];
@@ -2782,21 +2907,31 @@ async function syncPush(force){
   if(!SYNC.on || SYNC.busy) return;
   SYNC.busy=true;
   try{
-    const res=await remotePush(SYNC.ver, DB);
-    if(res && res.conflict){
-      const c=res.conflict;
-      DB=mergeDb(DB, c.db);
-      persistLocal();
-      setSyncVer(c.ver);
-      const r2=await remotePush(SYNC.ver, DB);
-      if(r2 && r2.ver!=null) setSyncVer(r2.ver);
-      refreshView();
-      toast('已合并其他设备的改动');
-    }else if(res && res.ver!=null){
-      setSyncVer(res.ver);
+    /* 撞车就"合并 → 重试"，最多三轮；三轮还不成留待下一轮定时器，绝不清空本地 */
+    let done=false;
+    for(let i=0;i<3;i++){
+      const res=await remotePush(SYNC.ver, DB);
+      if(res && res.conflict){
+        const c=res.conflict;
+        if(!c || !c.db){ break; }                 // 没拿到云端那份，先别动本地数据
+        DB=mergeDb(DB, c.db);
+        persistLocal(); setSyncVer(c.ver); baseIdsSet(DB);
+        refreshView();
+        toast('已合并其他设备的改动');
+        continue;
+      }
+      if(res && res.ver!=null) setSyncVer(res.ver);
+      done=true; break;
     }
-    SYNC.pend=false; SYNC.err='';
-    setSaveState('saved'); updateSyncInfo();
+    if(done){
+      SYNC.pend=false; SYNC.err='';
+      baseIdsSet(DB);
+      setSaveState('saved');
+    }else{
+      SYNC.pend=true;                             // 留待下一轮，数据都在本地，不丢
+      setSaveState('saving');
+    }
+    updateSyncInfo();
   }catch(e){
     if(e && e.code===401){
       if(authRedirect()){ SYNC.busy=false; return; }
@@ -2844,7 +2979,7 @@ async function syncPullFirst(){
     const localHasBiz=(DB.sale&&DB.sale.length)||(DB.purchase&&DB.purchase.length)||(DB.invoices&&DB.invoices.length);
     const firstContact=(getSyncVer()===0 && !localHasBiz);
     DB = firstContact ? JSON.parse(JSON.stringify(remote)) : mergeDb(DB, remote);
-    persistLocal(); setSyncVer(rv);
+    persistLocal(); setSyncVer(rv); baseIdsSet(DB);
     updateSyncInfo();
     toast(firstContact? '已载入云端数据' : '已合并云端最新数据');
     setTimeout(()=>location.reload(), 400);
@@ -2853,14 +2988,53 @@ async function syncPullFirst(){
   if(!hasData || stableStr(DB)!==stableStr(remote)){
     await syncPush(true);
   }else{
-    setSyncVer(rv); updateSyncInfo();
+    setSyncVer(rv); baseIdsSet(DB); updateSyncInfo();
   }
+}
+/* 是否正在输入：定时拉取会重绘页面，别把用户正在填的内容冲掉 */
+function isTyping(){
+  const a=document.activeElement;
+  if(!a) return false;
+  const t=(a.tagName||'').toUpperCase();
+  return t==='INPUT'||t==='TEXTAREA'||t==='SELECT'||a.isContentEditable===true;
+}
+/* 定时向云端拉一次：别的设备改了东西，这台不用刷新也能看到 */
+async function syncPullTick(force){
+  if(!SYNC.on || SYNC.busy) return;
+  if(document.hidden && !force) return;
+  if(SYNC.pend) return;                 // 本地还有没上传的改动，先让它传完再拉，避免互相覆盖
+  if(isTyping()) return;                // 正在输入，等下一次
+  const mask=document.getElementById('mask');
+  if(mask && mask.classList.contains('show')) return;   // 弹窗正在填，别打断
+  try{
+    const r=await remotePull();
+    const rv=(r&&r.ver)||0, remote=r&&r.db;
+    if(!remote || !rv || rv<=getSyncVer()) return;
+    DB=mergeDb(DB, remote);
+    persistLocal(); setSyncVer(rv); baseIdsSet(DB);
+    updateSyncInfo(); refreshView();
+    toast('已同步另一台设备的改动');
+    /* 这轮合并里若按"别处已经删了"丢掉了本机还留着的数据，必须把删除反推回云端，
+       否则云端还留着、两端各一份，永远对不齐 */
+    if(_mergeDropped){ _mergeDropped=false; SYNC.pend=true; syncPush(); }
+  }catch(e){
+    if(e && e.code===401) authRedirect();
+    /* 拉取失败一律静默：网络抖动不该弹窗打断开单 */
+  }
+}
+function syncTick(){
+  if(!SYNC.on || SYNC.busy) return;
+  if(SYNC.pend){ syncPush(); return; }   // 先把自己的改动推上去
+  syncPullTick(false);
 }
 function startSyncLoop(){
   if(SYNC.loop) return;
   SYNC.loop=true;
-  setInterval(()=>{ if(SYNC.on && SYNC.pend && !SYNC.busy) syncPush(); }, 15000);
+  setInterval(syncTick, 15000);
   window.addEventListener('online', ()=>{ if(SYNC.on && SYNC.pend) syncPush(); });
+  /* 切回这个标签页 / 窗口重新获得焦点时，立刻拉一次，几乎“一眼就看到” */
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) syncPullTick(true); });
+  window.addEventListener('focus', ()=>{ syncPullTick(true); });
 }
 async function syncBoot(){
   cloudCfgLoad();
@@ -2925,6 +3099,7 @@ async function saveCloud(){
 function clearCloud(){
   if(!confirm('关闭云同步？本机数据保留，只是不再上传。')) return;
   try{ localStorage.removeItem('erp_cloud'); }catch(e){}
+  baseIdsClear();
   CLOUD.url=''; CLOUD.key=''; SYNC.on=false; SYNC.err='';
   const box=document.getElementById('cloudBox'); if(box) box.style.display='none';
   updateSyncInfo(); toast('已关闭云同步');
@@ -2949,6 +3124,7 @@ async function useLocalServer(){
   }
   if(!confirm('把本机这份账目上传到 NAS 服务器，并清空 Supabase 配置？\n\n请先确认本机这份是最全的。')) return;
   try{ localStorage.removeItem('erp_cloud'); localStorage.removeItem('erp_sync_ver'); }catch(e){}
+  baseIdsClear();
   CLOUD.url=''; CLOUD.key=''; SYNC.on=false; SYNC.err='';
   toast('已切换，正在上传到 NAS…','long');
   setTimeout(()=>location.reload(), 700);

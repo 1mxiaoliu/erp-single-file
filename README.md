@@ -10,6 +10,17 @@
 
 ---
 
+<p align="center">
+  <img src="docs/screenshots/home.png" width="23%" alt="工作台" />
+  <img src="docs/screenshots/goods.png" width="23%" alt="商品管理" />
+  <img src="docs/screenshots/sale.png" width="23%" alt="销售单" />
+  <img src="docs/screenshots/report.png" width="23%" alt="经营报表" />
+</p>
+
+> 截图为内置演示数据：在网址后加 `?demo=1` 就能看到同样的账本，不碰你的真实数据。
+
+---
+
 ## 功能
 
 | 模块 | 能力 |
