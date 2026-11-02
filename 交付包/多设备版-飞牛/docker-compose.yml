@@ -1,0 +1,73 @@
+# 进销存 ERP —— 多设备同步服务 + 外网通道（Tailscale）
+#
+# 任何能跑 Docker 的 NAS 都能用：飞牛 / 群晖 / 威联通 / 极空间 / 绿联 …
+# 用法：把整个文件夹放到 NAS 上，用这个目录建一个「项目（Compose）」。
+#
+# ════════════════════════════════════════════════════════════
+#  启动前必须改两处：
+#    ① erp       的 ERP_PASS    —— 账本访问密码（8 位以上）
+#    ② tailscale 的 TS_AUTHKEY  —— 在 tailscale.com 后台生成
+#                                   步骤见《Tailscale-外网访问.md》第 1 步
+#
+#  ②不填会怎样：两个容器都能正常启动，NAS 内网也能用，
+#  但手机在外面（4G / 别人店里 WiFi）打不开。不会报错，别以为坏了。
+# ════════════════════════════════════════════════════════════
+
+services:
+  # ───────────────────────────────────────────────────────────
+  # 1) 账本本体：登录、存取数据、每日备份
+  # ───────────────────────────────────────────────────────────
+  erp:
+    image: node:20-alpine
+    container_name: erp
+    restart: unless-stopped
+    working_dir: /src
+    command: ["node", "/src/server.js"]
+    ports:
+      - "8080:8080"          # NAS 上 8080 被占了（威联通常见）就改成 "8090:8080"
+    environment:
+      TZ: Asia/Shanghai
+      PORT: "8080"
+      ERP_PASS: "change-me-123"   # ← ① 改成你自己的密码，8 位以上
+      DATA_DIR: "/data"
+      WEB_DIR: "/src/web"
+      KEEP_DAYS: "14"             # 每日备份保留天数
+      MAX_MB: "64"                # 单次上传上限（MB）
+    volumes:
+      - ./data:/data              # 账目 + 每日备份，落在 NAS 硬盘上
+      - ./:/src:ro                # 程序和网页，只读挂载（换网页不用重启）
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # ───────────────────────────────────────────────────────────
+  # 2) 外网通道：Tailscale
+  #
+  # 它不是"把端口开到公网上"，而是给 NAS 装了一块虚拟网卡，
+  # 只有登录了你同一个 Tailscale 账号的设备（你的手机、你的电脑）
+  # 才能看到 NAS 的 100.x.x.x 地址。别人扫端口扫不到。
+  # ───────────────────────────────────────────────────────────
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale-erp
+    restart: unless-stopped
+    network_mode: host          # 必须 host：这样 100.x.x.x:8080 才能直达账本
+    environment:
+      TZ: Asia/Shanghai
+      TS_AUTHKEY: "tskey-auth-在这里粘贴"   # ← ② 见《Tailscale-外网访问.md》
+      TS_STATE_DIR: "/var/lib/tailscale"
+      TS_HOSTNAME: "feiniu-erp"            # 之后手机可用 http://feiniu-erp:8080
+      TS_USERSPACE: "false"
+    volumes:
+      - ./ts-state:/var/lib/tailscale      # 登录状态存这里，重启/升级不用重新登录
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

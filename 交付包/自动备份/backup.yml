@@ -1,0 +1,60 @@
+name: ERP 每日备份
+
+# 每天自动从 Supabase 把整本账拉一份下来，存进这个仓库的 backups/ 目录。
+# 除了定时，也可以在 GitHub 网页上点一下手动跑。
+
+on:
+  schedule:
+    - cron: "0 18 * * *"   # UTC 18:00 = 北京时间每天 02:00
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 从 Supabase 拉取数据
+        env:
+          SUPA_URL: ${{ secrets.SUPA_URL }}
+          SUPA_KEY: ${{ secrets.SUPA_KEY }}
+        run: |
+          set -e
+          DAY=$(date -u +%F)
+          mkdir -p backups
+
+          # 防止地址末尾多打了斜杠
+          SUPA_URL="${SUPA_URL%/}"
+
+          curl -sS --fail --retry 3 \
+            -H "apikey: $SUPA_KEY" \
+            -H "Authorization: Bearer $SUPA_KEY" \
+            "$SUPA_URL/rest/v1/erp_doc?id=eq.main&select=ver,updated_at,doc" \
+            -o /tmp/raw.json
+
+          echo "响应大小: $(wc -c < /tmp/raw.json) 字节"
+
+          # 云端还是空库（刚建好、还没开过单）就别提交空文件
+          if [ "$(jq '.[0].doc | length' /tmp/raw.json)" = "0" ]; then
+            echo "云端账本还是空的，今天跳过"
+            exit 0
+          fi
+
+          # 只取 doc 这一层，导出的文件可以直接在网页「导入恢复」里用
+          jq '.[0].doc' /tmp/raw.json > "backups/$DAY.json"
+          echo "ver=$(jq -r '.[0].ver' /tmp/raw.json)  更新时间=$(jq -r '.[0].updated_at' /tmp/raw.json)" > "backups/$DAY.txt"
+
+          # 只留最近 180 天，避免仓库无限变大
+          find backups -type f -mtime +180 -delete
+          ls -la backups | tail -5
+
+      - name: 提交到仓库
+        run: |
+          git config user.name  "erp-backup-bot"
+          git config user.email "backup@local"
+          git add backups
+          git diff --cached --quiet || git commit -m "备份 $(date -u +%F)"
+          git push
