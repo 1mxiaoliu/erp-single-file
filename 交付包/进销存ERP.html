@@ -390,6 +390,11 @@
   .seg{display:flex; background:#eef1f7; border-radius:12px; padding:4px; margin-bottom:14px;}
   .seg button{flex:1; border-radius:9px; padding:9px; font-size:13px; color:var(--sub); font-weight:550; transition:.15s;}
   .seg button.on{background:#fff; color:var(--primary); box-shadow:var(--shadow-sm);}
+  .seg.tight{margin-bottom:10px;}
+  .seg.tight button{padding:7px 4px; font-size:12.5px;}
+  .dateinp{border:1px solid var(--line); border-radius:10px; padding:7px 10px; font-size:13px; background:#fff; color:var(--ink); outline:none; font-family:inherit; -webkit-appearance:none; appearance:none;}
+  .dateinp:focus{border-color:var(--primary);}
+  .dateinp:disabled{background:#f6f7fb; color:var(--sub);}
 
   .kv{display:flex; justify-content:space-between; align-items:center; padding:11px 0; border-bottom:1px solid var(--line); font-size:13.5px;}
   .kv:last-child{border-bottom:none;}
@@ -632,10 +637,18 @@
       </div>
       <div class="card">
         <div class="h"><div class="t">客户对账单</div><span class="tag gray">Excel</span></div>
-        <div class="kv"><span class="k">对账月份</span><span class="v"><select id="stMonth" onchange="renderStatement()" style="border:1px solid var(--line);border-radius:10px;padding:7px 10px;font-size:13px;background:#fff;color:var(--ink);outline:none"></select></span></div>
+        <div class="kv"><span class="k">开始日期</span><span class="v"><input type="date" class="dateinp" id="stFrom" onchange="stManual()"></span></div>
+        <div class="kv"><span class="k">结束日期</span><span class="v"><input type="date" class="dateinp" id="stTo" onchange="stManual()"></span></div>
+        <div class="seg tight" id="stQuick" style="margin-top:12px">
+          <button onclick="stQuick('cur',this)">本月</button>
+          <button onclick="stQuick('last',this)">上月</button>
+          <button onclick="stQuick('30d',this)">近30天</button>
+          <button onclick="stQuick('year',this)">今年</button>
+          <button onclick="stQuick('all',this)">全部</button>
+        </div>
         <div id="stList"></div>
         <button class="btn block" style="margin-top:10px" id="stAllBtn" onclick="stExportAll()">生成全部客户的账单</button>
-        <div style="font-size:12px;line-height:1.7;color:var(--sub);margin-top:8px">点「下载」即生成并保存到本机，账本里不保留任何表格文件。<br>表格标题用公司名（<span id="stHead" style="color:var(--ink)"></span>），文件名用客户名；两者都取自你录入的资料。</div>
+        <div style="font-size:12px;line-height:1.7;color:var(--sub);margin-top:8px">点「下载」即生成并保存到本机，账本里不保留任何表格文件。<br>区间可自己选起止日期，也可以点上面的快捷项；选整月时文件名沿用「客户名N月份对账明细」。<br>表格标题用公司名（<span id="stHead" style="color:var(--ink)"></span>），文件名用客户名；两者都取自你录入的资料。</div>
       </div>
       <div class="card">
         <div class="h"><div class="t">商品销售排行 TOP 5</div></div>
@@ -695,7 +708,7 @@
         <div class="kv" id="loginRow" style="display:none"><span class="k">登录状态</span><span class="v" id="loginInfo">—</span></div>
         <div id="cloudBox" style="display:none; margin-top:10px">
           <div class="field"><label>Supabase 项目地址</label><input id="cl_url" placeholder="https://xxxx.supabase.co" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
-          <div class="field"><label>anon public key</label><input id="cl_key" placeholder="eyJhbGciOiJIUzI1NiIs..." autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+          <div class="field"><label>anon public key</label><input id="cl_key" placeholder="粘贴 anon public key" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
           <button class="btn block" onclick="saveCloud()">保存并连接</button>
           <button class="btn ghost2 block" style="margin-top:8px" onclick="clearCloud()">关闭云同步</button>
           <div style="font-size:11.5px;color:#8a93a5;line-height:1.7;margin-top:8px">这两项只存在本机。手机和电脑填同一套，就共用一份数据。</div>
@@ -1131,8 +1144,9 @@ function restoreBak(){
   }catch(e){ toast('备份损坏'); }
 }
 function uid(p){ return p+Date.now().toString(36)+Math.floor(Math.random()*900+100); }
-function now(){ return new Date().toISOString().slice(0,10); }
-function month(){ return new Date().toISOString().slice(0,7); }
+/* 取本地日期：toISOString 是 UTC，东八区 0—8 点录单会被记成前一天 */
+function now(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function month(){ return now().slice(0,7); }
 function money(n){ return '¥'+(n||0).toLocaleString('zh-CN',{maximumFractionDigits:2}); }
 /* 内联事件安全的字符串转义 */
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
@@ -1716,10 +1730,59 @@ function xXlsx(rows, merges, cols){
     {name:'xl/worksheets/sheet1.xml', data:enc.encode(sheet)}
   ]);
 }
-/* 取某客户某月的对账明细行（按日期升序，单据内按开单顺序） */
-function stItems(custId, ym){
+/* ---------- 对账区间：输入框 + 快捷预设 ---------- */
+const stP2=n=>String(n).padStart(2,'0');
+function stYmd(d){ return d.getFullYear()+'-'+stP2(d.getMonth()+1)+'-'+stP2(d.getDate()); }
+function stMonthEnd(ym){ const p=ym.split('-'); return ym+'-'+stP2(new Date(+p[0],+p[1],0).getDate()); }
+function stPreset(k){
+  const t=new Date(), y=t.getFullYear(), m=t.getMonth();
+  if(k==='cur'){ const f=stYmd(new Date(y,m,1)); return {from:f, to:stMonthEnd(f.slice(0,7))}; }
+  if(k==='last'){ const f=stYmd(new Date(y,m-1,1)); return {from:f, to:stMonthEnd(f.slice(0,7))}; }
+  if(k==='year'){ return {from:y+'-01-01', to:stYmd(t)}; }
+  if(k==='all'){
+    const ds=DB.sale.map(o=>String(o.date||'')).filter(Boolean).sort();
+    if(ds.length) return {from:ds[0], to:ds[ds.length-1]};
+    return {from:stYmd(new Date(y,m,1)), to:stYmd(t)};
+  }
+  return {from:stYmd(new Date(y,m,t.getDate()-29)), to:stYmd(t)};
+}
+function stInit(){
+  const a=document.getElementById('stFrom'), b=document.getElementById('stTo');
+  if(!a||!b) return;
+  if(!a.value||!b.value){
+    const r=stPreset('cur'); a.value=r.from; b.value=r.to;
+    const q=document.querySelector('#stQuick button'); if(q) q.classList.add('on');
+  }
+}
+/* 读输入框，空值回退本月；起止颠倒时静默对调（手动改的那次已提示过） */
+function stRange(){
+  stInit();
+  const a=document.getElementById('stFrom'), b=document.getElementById('stTo');
+  let from=a.value, to=b.value;
+  if(from>to){ const t=from; from=to; to=t; }
+  return {from, to};
+}
+function stQuick(k,btn){
+  const r=stPreset(k);
+  document.getElementById('stFrom').value=r.from;
+  document.getElementById('stTo').value=r.to;
+  document.querySelectorAll('#stQuick button').forEach(x=>x.classList.remove('on'));
+  if(btn) btn.classList.add('on');
+  renderStatement();
+}
+function stManual(){
+  const a=document.getElementById('stFrom'), b=document.getElementById('stTo');
+  if(a.value && b.value && a.value>b.value){
+    const t=a.value; a.value=b.value; b.value=t;
+    toast('开始日期晚于结束日期，已自动调换');
+  }
+  document.querySelectorAll('#stQuick button').forEach(x=>x.classList.remove('on'));
+  renderStatement();
+}
+/* 取某客户在 [from,to] 内的对账明细行（按日期升序，单据内按开单顺序） */
+function stItems(custId, from, to){
   const out=[];
-  DB.sale.filter(o=>o.partnerId===custId && String(o.date||'').slice(0,7)===ym)
+  DB.sale.filter(o=>o.partnerId===custId && String(o.date||'')>=from && String(o.date||'')<=to)
     .sort((a,b)=>String(a.date||'').localeCompare(String(b.date||''))||((a.ts||0)-(b.ts||0)))
     .forEach(o=>{
       const memo=(o.remark||'').trim();
@@ -1731,17 +1794,16 @@ function stItems(custId, ym){
     });
   return out;
 }
-function stBuild(custId, ym){
+function stBuild(custId, from, to){
   const cust=DB.customers.find(c=>c.id===custId); if(!cust) return null;
-  const items=stItems(custId,ym); if(!items.length) return null;
+  const items=stItems(custId,from,to); if(!items.length) return null;
   const total=Math.round(items.reduce((a,x)=>a+x.amount,0)*100)/100;
-  const p=ym.split('-'), lastDay=new Date(+p[0],+p[1],0).getDate();
   /* 表格区域每格都带边框（含空格），否则合并/留空的格子在 Excel 里会缺边 */
   const bar=(st)=>Array.from({length:7},()=>({v:'',s:st}));
   const rows=[];
   /* 标题抬头取「我的 → 公司信息 / LOGO」里填的公司名，客户名只进文件名（与原表一致） */
   const co=((DB.company&&DB.company.name)||'').trim()||cust.name;
-  rows.push([{v:co+'对账明细'+ym+'-01至'+ym+'-'+String(lastDay).padStart(2,'0'), s:1}, ...bar(1).slice(1)]);
+  rows.push([{v:co+'对账明细'+from+'至'+to, s:1}, ...bar(1).slice(1)]);
   rows.push(bar(1));
   rows.push(['时间','物品名称','物品单位','物品数量','单价','金额','备注'].map(h=>({v:h,s:2})));
   let prev='';
@@ -1763,12 +1825,15 @@ function stBuild(custId, ym){
   /* 列宽取自原模板（67/142/61/61/67/67/107 像素，按 Excel 的 7px≈1 字符换算） */
   const bytes=xXlsx(rows, merges, [9.57,20.29,8.71,8.71,9.57,9.57,15.29]);
   const safe=cust.name.replace(/[\\/:*?"<>|]/g,'');
-  return {bytes, name:safe+(+p[1])+'月份对账明细.xlsx'};
+  /* 正好选满一个整月时沿用「客户名N月份对账明细」，自定义区间则用起止日期命名 */
+  const ym=from.slice(0,7);
+  const fullMonth = from===ym+'-01' && to===stMonthEnd(ym);
+  return {bytes, name:safe+(fullMonth? (+ym.slice(5,7))+'月份' : from+'至'+to)+'对账明细.xlsx'};
 }
 function stDownload(custId){
-  const sel=document.getElementById('stMonth'); if(!sel) return;
-  const d=stBuild(custId, sel.value);
-  if(!d){ toast('这个月没有销售单'); return; }
+  const r=stRange();
+  const d=stBuild(custId, r.from, r.to);
+  if(!d){ toast('这段时间没有销售单'); return; }
   const url=URL.createObjectURL(new Blob([d.bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
   const a=document.createElement('a'); a.href=url; a.download=d.name;
   document.body.appendChild(a); a.click();
@@ -1777,25 +1842,15 @@ function stDownload(custId){
   toast('已生成：'+d.name);
 }
 function renderStatement(){
-  const sel=document.getElementById('stMonth'); if(!sel) return;
-  if(!sel.options.length){
-    const now=new Date(); let h='';
-    for(let i=0;i<12;i++){
-      const d=new Date(now.getFullYear(),now.getMonth()-i,1);
-      const ym=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
-      h+='<option value="'+ym+'">'+d.getFullYear()+'年'+(d.getMonth()+1)+'月</option>';
-    }
-    sel.innerHTML=h;
-  }
-  const ym=sel.value, list=[];
+  const r=stRange(), list=[];
   const hd=document.getElementById('stHead');
   if(hd) hd.textContent=(((DB.company&&DB.company.name)||'').trim()||'未填（点「我的 → 公司信息 / LOGO」设置）');
   DB.customers.forEach(c=>{
-    const os=DB.sale.filter(o=>o.partnerId===c.id && String(o.date||'').slice(0,7)===ym);
+    const os=DB.sale.filter(o=>o.partnerId===c.id && String(o.date||'')>=r.from && String(o.date||'')<=r.to);
     if(os.length) list.push({c, n:os.length, amt:os.reduce((a,o)=>a+(o.total||0),0)});
   });
   const el=document.getElementById('stList'), btn=document.getElementById('stAllBtn');
-  if(!list.length){ el.innerHTML='<div class="empty">这个月还没有销售单</div>'; if(btn) btn.style.display='none'; return; }
+  if(!list.length){ el.innerHTML='<div class="empty">'+r.from+' 至 '+r.to+' 没有销售单</div>'; if(btn) btn.style.display='none'; return; }
   if(btn){ btn.style.display=''; btn.textContent='生成全部客户的账单（'+list.length+' 个）'; }
   el.innerHTML='<div class="list">'+list.map(x=>`<div class="row click" data-id="${x.c.id}" onclick="stDownload(this.dataset.id)">
     <div class="icon-cell">${ic('user')}</div>
@@ -1804,10 +1859,10 @@ function renderStatement(){
   </div>`).join('')+'</div>';
 }
 function stExportAll(){
-  const ym=document.getElementById('stMonth').value;
-  const list=DB.customers.filter(c=>DB.sale.some(o=>o.partnerId===c.id && String(o.date||'').slice(0,7)===ym));
-  if(!list.length){ toast('这个月没有销售单'); return; }
-  if(list.length>1 && !confirm('将连续下载 '+list.length+' 个文件，浏览器可能会询问「是否允许下载多个文件」，点允许即可。继续？')) return;
+  const r=stRange();
+  const list=DB.customers.filter(c=>DB.sale.some(o=>o.partnerId===c.id && String(o.date||'')>=r.from && String(o.date||'')<=r.to));
+  if(!list.length){ toast('这段时间没有销售单'); return; }
+  if(list.length>1 && !confirm('将连续下载 '+list.length+' 个文件（'+r.from+' 至 '+r.to+'），浏览器可能会询问「是否允许下载多个文件」，点允许即可。继续？')) return;
   list.forEach((c,i)=>setTimeout(()=>stDownload(c.id), i*700));
 }
 
