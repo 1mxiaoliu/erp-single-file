@@ -631,6 +631,13 @@
         <div class="kv"><span class="k">毛利（销售 − 进货）</span><span class="v" id="rProfit">¥0</span></div>
       </div>
       <div class="card">
+        <div class="h"><div class="t">客户对账单</div><span class="tag gray">Excel</span></div>
+        <div class="kv"><span class="k">对账月份</span><span class="v"><select id="stMonth" onchange="renderStatement()" style="border:1px solid var(--line);border-radius:10px;padding:7px 10px;font-size:13px;background:#fff;color:var(--ink);outline:none"></select></span></div>
+        <div id="stList"></div>
+        <button class="btn block" style="margin-top:10px" id="stAllBtn" onclick="stExportAll()">生成全部客户的账单</button>
+        <div style="font-size:12px;line-height:1.7;color:var(--sub);margin-top:8px">点「下载」即生成并保存到本机，账本里不保留任何表格文件。<br>表格标题用公司名（<span id="stHead" style="color:var(--ink)"></span>），文件名用客户名；两者都取自你录入的资料。</div>
+      </div>
+      <div class="card">
         <div class="h"><div class="t">商品销售排行 TOP 5</div></div>
         <div id="rankList"></div>
       </div>
@@ -1161,6 +1168,8 @@ function seed(){
   const dAgo=n=>{ const d=new Date(); d.setDate(d.getDate()-n); return d.toISOString().slice(0,10); };
   let sq=0;
   const mkOrder=(isSale,days,partner,lines)=>{
+    /* 允许传 id 字符串或对象：演示数据里传的是 c1/s1 这种 id */
+    if(typeof partner==='string') partner={id:partner, name:((isSale?base.customers:base.suppliers).find(x=>x.id===partner)||{}).name||''};
     const date=dAgo(days), ts=Date.now()-days*864e5;
     const no=(isSale?'XS':'JH')+date.replace(/-/g,'').slice(2)+String(++sq).padStart(2,'0');
     const items=lines.map(([gi,q])=>{
@@ -1612,6 +1621,194 @@ function renderReport(){
   const map={}; DB.sale.forEach(o=>o.items.forEach(it=>map[it.goodsId]=(map[it.goodsId]||0)+it.qty*it.price));
   const rank=Object.entries(map).map(([id,v])=>({g:goodById(id),v})).filter(x=>x.g).sort((a,b)=>b.v-a.v).slice(0,5);
   document.getElementById('rankList').innerHTML=rank.length?'<div class="list">'+rank.map((x,i)=>`<div class="row"><div class="av" style="background:${i<3?'var(--primary-soft)':'#f1f3f8'};color:${i<3?'var(--primary)':'var(--sub)'}">${i+1}</div><div class="main"><div class="t">${x.g.name}</div><div class="s">销售额</div></div><div class="right"><span class="amt">${money(x.v)}</span></div></div>`).join('')+'</div>':'<div class="empty">暂无销售数据</div>';
+  renderStatement();
+}
+
+/* ================= 客户对账单：浏览器现场生成 xlsx，直接下载 =================
+   xlsx 本质是一个 zip 包，这里用「不压缩存储」的方式在浏览器里拼出来，
+   所以不需要任何第三方库、不经过服务器、也不在账本里留文件——
+   点一下按钮，文件直接进手机或电脑的「下载」里。 */
+const XCRC_T=(()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); t[n]=c>>>0; } return t; })();
+function xCrc32(u8){ let c=0xFFFFFFFF; for(let i=0;i<u8.length;i++) c=XCRC_T[(c^u8[i])&0xFF]^(c>>>8); return (c^0xFFFFFFFF)>>>0; }
+function xZip(files){
+  const enc=new TextEncoder(), parts=[], cen=[]; let off=0;
+  const d=new Date();
+  const dosTime=((d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1))&0xFFFF;
+  const dosDate=(((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate())&0xFFFF;
+  for(const f of files){
+    const nm=enc.encode(f.name), dat=f.data, crc=xCrc32(dat);
+    const lh=new DataView(new ArrayBuffer(30));
+    lh.setUint32(0,0x04034b50,true); lh.setUint16(4,20,true); lh.setUint16(6,0x0800,true);
+    lh.setUint16(8,0,true); lh.setUint16(10,dosTime,true); lh.setUint16(12,dosDate,true);
+    lh.setUint32(14,crc,true); lh.setUint32(18,dat.length,true); lh.setUint32(22,dat.length,true);
+    lh.setUint16(26,nm.length,true); lh.setUint16(28,0,true);
+    parts.push(new Uint8Array(lh.buffer),nm,dat);
+    const ch=new DataView(new ArrayBuffer(46));
+    ch.setUint32(0,0x02014b50,true); ch.setUint16(4,20,true); ch.setUint16(6,20,true);
+    ch.setUint16(8,0x0800,true); ch.setUint16(10,0,true); ch.setUint16(12,dosTime,true); ch.setUint16(14,dosDate,true);
+    ch.setUint32(16,crc,true); ch.setUint32(20,dat.length,true); ch.setUint32(24,dat.length,true);
+    ch.setUint16(28,nm.length,true); ch.setUint16(30,0,true); ch.setUint16(32,0,true);
+    ch.setUint16(34,0,true); ch.setUint16(36,0,true); ch.setUint32(38,0,true); ch.setUint32(42,off,true);
+    cen.push(new Uint8Array(ch.buffer),nm);
+    off+=30+nm.length+dat.length;
+  }
+  const cenSize=cen.reduce((a,x)=>a+x.length,0);
+  const end=new DataView(new ArrayBuffer(22));
+  end.setUint32(0,0x06054b50,true); end.setUint16(8,files.length,true); end.setUint16(10,files.length,true);
+  end.setUint32(12,cenSize,true); end.setUint32(16,off,true);
+  const all=parts.concat(cen,[new Uint8Array(end.buffer)]);
+  const size=all.reduce((a,x)=>a+x.length,0);
+  const out=new Uint8Array(size); let p=0;
+  for(const x of all){ out.set(x,p); p+=x.length; }
+  return out;
+}
+function xEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function xCol(i){ let s='',n=i+1; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=Math.floor((n-1)/26); } return s; }
+function xSerial(ymd){ const a=String(ymd||'').split('-').map(Number); if(!a[0]) return 0; return Math.round((Date.UTC(a[0],a[1]-1,a[2])-Date.UTC(1899,11,30))/864e5); }
+function xNum(n){ return String(Math.round((+n||0)*100)/100); }
+const X_STYLES='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
++'<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
++'<numFmts count="1"><numFmt numFmtId="176" formatCode="m&quot;月&quot;d&quot;日&quot;"/></numFmts>'
++'<fonts count="3"><font><sz val="11"/><name val="宋体"/><charset val="134"/></font>'
++'<font><sz val="16"/><name val="宋体"/><charset val="134"/></font>'
++'<font><b/><sz val="11"/><name val="宋体"/><charset val="134"/></font></fonts>'
++'<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
++'<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>'
++'<border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="thin"/><diagonal/></border></borders>'
++'<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
++'<cellXfs count="8">'
++'<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
++'<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
++'<xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
++'<xf numFmtId="176" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
++'<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
++'<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
++'<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
++'<xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
++'</cellXfs><cellStyles count="1"><cellStyle name="常规" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
+/* 生成 xlsx 字节：rows 是二维数组，单元格 {v:值, s:样式序号, n:1 表示数字} */
+function xXlsx(rows, merges, cols){
+  let sd='';
+  rows.forEach((r,ri)=>{
+    sd+='<row r="'+(ri+1)+'" ht="16" customHeight="1">';
+    (r||[]).forEach((c,ci)=>{
+      if(!c) return;
+      const ref=xCol(ci)+(ri+1);
+      if(c.n) sd+='<c r="'+ref+'" s="'+c.s+'"><v>'+c.v+'</v></c>';
+      else sd+='<c r="'+ref+'" s="'+c.s+'" t="inlineStr"><is><t xml:space="preserve">'+xEsc(c.v)+'</t></is></c>';
+    });
+    sd+='</row>';
+  });
+  const sheet='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    +'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    +'<sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="16"/>'
+    +'<cols>'+cols.map((w,i)=>'<col min="'+(i+1)+'" max="'+(i+1)+'" width="'+w+'" customWidth="1"/>').join('')+'</cols>'
+    +'<sheetData>'+sd+'</sheetData>'
+    +(merges.length?'<mergeCells count="'+merges.length+'">'+merges.map(m=>'<mergeCell ref="'+m+'"/>').join('')+'</mergeCells>':'')
+    +'</worksheet>';
+  const enc=new TextEncoder();
+  return xZip([
+    {name:'[Content_Types].xml', data:enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>')},
+    {name:'_rels/.rels', data:enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')},
+    {name:'xl/workbook.xml', data:enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="对账单" sheetId="1" r:id="rId1"/></sheets></workbook>')},
+    {name:'xl/_rels/workbook.xml.rels', data:enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')},
+    {name:'xl/styles.xml', data:enc.encode(X_STYLES)},
+    {name:'xl/worksheets/sheet1.xml', data:enc.encode(sheet)}
+  ]);
+}
+/* 取某客户某月的对账明细行（按日期升序，单据内按开单顺序） */
+function stItems(custId, ym){
+  const out=[];
+  DB.sale.filter(o=>o.partnerId===custId && String(o.date||'').slice(0,7)===ym)
+    .sort((a,b)=>String(a.date||'').localeCompare(String(b.date||''))||((a.ts||0)-(b.ts||0)))
+    .forEach(o=>{
+      const memo=(o.remark||'').trim();
+      (o.items||[]).forEach(it=>{
+        const g=goodById(it.goodsId)||{};
+        out.push({date:o.date, name:g.name||'—', unit:g.unit||'', qty:+it.qty||0, price:+it.price||0,
+          amount:Math.round((+it.qty||0)*(+it.price||0)*100)/100, memo});
+      });
+    });
+  return out;
+}
+function stBuild(custId, ym){
+  const cust=DB.customers.find(c=>c.id===custId); if(!cust) return null;
+  const items=stItems(custId,ym); if(!items.length) return null;
+  const total=Math.round(items.reduce((a,x)=>a+x.amount,0)*100)/100;
+  const p=ym.split('-'), lastDay=new Date(+p[0],+p[1],0).getDate();
+  /* 表格区域每格都带边框（含空格），否则合并/留空的格子在 Excel 里会缺边 */
+  const bar=(st)=>Array.from({length:7},()=>({v:'',s:st}));
+  const rows=[];
+  /* 标题抬头取「我的 → 公司信息 / LOGO」里填的公司名，客户名只进文件名（与原表一致） */
+  const co=((DB.company&&DB.company.name)||'').trim()||cust.name;
+  rows.push([{v:co+'对账明细'+ym+'-01至'+ym+'-'+String(lastDay).padStart(2,'0'), s:1}, ...bar(1).slice(1)]);
+  rows.push(bar(1));
+  rows.push(['时间','物品名称','物品单位','物品数量','单价','金额','备注'].map(h=>({v:h,s:2})));
+  let prev='';
+  items.forEach(it=>{
+    const show=it.date && it.date!==prev;
+    rows.push([
+      show?{v:xSerial(it.date),n:1,s:3}:{v:'',s:3},
+      {v:it.name,s:4},
+      {v:it.unit,s:4},
+      {v:xNum(it.qty),n:1,s:4},
+      {v:xNum(it.price),n:1,s:4},
+      {v:xNum(it.amount),n:1,s:4},
+      {v:it.memo||'',s:4}
+    ]);
+    prev=it.date;
+  });
+  const tr=bar(0); tr[4]={v:'合计：'+xNum(total)+'元',s:7}; tr[5]={v:'',s:7}; rows.push(tr);
+  const merges=['A1:G2','E'+rows.length+':F'+rows.length];
+  /* 列宽取自原模板（67/142/61/61/67/67/107 像素，按 Excel 的 7px≈1 字符换算） */
+  const bytes=xXlsx(rows, merges, [9.57,20.29,8.71,8.71,9.57,9.57,15.29]);
+  const safe=cust.name.replace(/[\\/:*?"<>|]/g,'');
+  return {bytes, name:safe+(+p[1])+'月份对账明细.xlsx'};
+}
+function stDownload(custId){
+  const sel=document.getElementById('stMonth'); if(!sel) return;
+  const d=stBuild(custId, sel.value);
+  if(!d){ toast('这个月没有销售单'); return; }
+  const url=URL.createObjectURL(new Blob([d.bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+  const a=document.createElement('a'); a.href=url; a.download=d.name;
+  document.body.appendChild(a); a.click();
+  /* 不能立刻 revoke：文件还在写盘时释放 blob 会把下载任务取消（手机慢速存储尤其明显） */
+  setTimeout(()=>{ try{ URL.revokeObjectURL(url); }catch(e){} a.remove(); }, 60000);
+  toast('已生成：'+d.name);
+}
+function renderStatement(){
+  const sel=document.getElementById('stMonth'); if(!sel) return;
+  if(!sel.options.length){
+    const now=new Date(); let h='';
+    for(let i=0;i<12;i++){
+      const d=new Date(now.getFullYear(),now.getMonth()-i,1);
+      const ym=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+      h+='<option value="'+ym+'">'+d.getFullYear()+'年'+(d.getMonth()+1)+'月</option>';
+    }
+    sel.innerHTML=h;
+  }
+  const ym=sel.value, list=[];
+  const hd=document.getElementById('stHead');
+  if(hd) hd.textContent=(((DB.company&&DB.company.name)||'').trim()||'未填（点「我的 → 公司信息 / LOGO」设置）');
+  DB.customers.forEach(c=>{
+    const os=DB.sale.filter(o=>o.partnerId===c.id && String(o.date||'').slice(0,7)===ym);
+    if(os.length) list.push({c, n:os.length, amt:os.reduce((a,o)=>a+(o.total||0),0)});
+  });
+  const el=document.getElementById('stList'), btn=document.getElementById('stAllBtn');
+  if(!list.length){ el.innerHTML='<div class="empty">这个月还没有销售单</div>'; if(btn) btn.style.display='none'; return; }
+  if(btn){ btn.style.display=''; btn.textContent='生成全部客户的账单（'+list.length+' 个）'; }
+  el.innerHTML='<div class="list">'+list.map(x=>`<div class="row click" data-id="${x.c.id}" onclick="stDownload(this.dataset.id)">
+    <div class="icon-cell">${ic('user')}</div>
+    <div class="main"><div class="t">${esc(x.c.name)}</div><div class="s">${x.n} 张单 · ${money(x.amt)}</div></div>
+    <button class="btn ghost2 sm" style="margin-right:6px" onclick="event.stopPropagation();stDownload(this.closest('.row').dataset.id)">下载</button>
+  </div>`).join('')+'</div>';
+}
+function stExportAll(){
+  const ym=document.getElementById('stMonth').value;
+  const list=DB.customers.filter(c=>DB.sale.some(o=>o.partnerId===c.id && String(o.date||'').slice(0,7)===ym));
+  if(!list.length){ toast('这个月没有销售单'); return; }
+  if(list.length>1 && !confirm('将连续下载 '+list.length+' 个文件，浏览器可能会询问「是否允许下载多个文件」，点允许即可。继续？')) return;
+  list.forEach((c,i)=>setTimeout(()=>stDownload(c.id), i*700));
 }
 
 /* ================= 仓库 ================= */
