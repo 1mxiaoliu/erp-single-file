@@ -550,6 +550,7 @@
     <section class="view" id="v-goods">
       <div class="toolbar">
         <div class="searchwrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg><input id="goodsSearch" placeholder="搜索商品名称 / 编码" oninput="queueGoods()" /></div>
+        <button class="btn line" onclick="openSheet('import')" style="white-space:nowrap">导入</button>
         <button class="btn" onclick="openSheet('goods')" style="white-space:nowrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>新增</button>
       </div>
       <div class="cggrid" id="catGrid"></div>
@@ -1009,6 +1010,7 @@ function load(){
       /* 客户专属价记忆表：key = 类型|往来单位id|商品id → 上次成交价 */
       d.priceMemo=d.priceMemo||{};
       d.priceMemoTs=d.priceMemoTs||{};
+      d.priceUnit=d.priceUnit||{};
       /* 旧版把 base64 塞在商品里：搬到内存+待写队列，并从主数据删除，主数据立刻变小 */
       d.goods.forEach(g=>{
         if(typeof g.img==='string' && g.img.indexOf('data:')===0){
@@ -1147,7 +1149,13 @@ function restoreBak(){
     localStorage.setItem(KEY, raw); toast('已恢复，正在刷新…'); setTimeout(()=>location.reload(),600);
   }catch(e){ toast('备份损坏'); }
 }
-function uid(p){ return p+Date.now().toString(36)+Math.floor(Math.random()*900+100); }
+/* 同一毫秒内批量生成（如导入 244 个商品）靠时间戳+随机数会撞号，加自增序数保证唯一 */
+var _uidSeq=0;
+function uid(p){
+  _uidSeq=(_uidSeq||0)+1;
+  const n=_uidSeq%46656;
+  return p+Date.now().toString(36)+n.toString(36)+Math.floor(Math.random()*900+100);
+}
 /* 取本地日期：toISOString 是 UTC，东八区 0—8 点录单会被记成前一天 */
 function now(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 function month(){ return now().slice(0,7); }
@@ -1167,7 +1175,7 @@ function seed(){
     suppliers:[], customers:[],
     goods:[], purchase:[], sale:[], flow:[], invoices:[],
     categories:cats.slice(),
-    priceMemo:{}, priceMemoTs:{},
+    priceMemo:{}, priceMemoTs:{}, priceUnit:{},
     company:{name:'我的公司', sub:'', docTitle:'送货单（结账单）', addr:'', phone:'', web:'', sender:'', card:'', holder:''}};
   if(!isDemo()) return base;
 
@@ -1331,7 +1339,7 @@ function renderHome(){
     <div class="q" onclick="openSheet('transfer')"><div class="qi p">${ic('swap')}</div><div class="ql">调拨</div></div>
     <div class="q" onclick="openSheet('goods')"><div class="qi o">${ic('box')}</div><div class="ql">新增商品</div></div>`;
 
-  const warn=DB.goods.filter(g=>totalStock(g)<=g.warn);
+  const warn=DB.goods.filter(g=>(+g.warn||0)>0 && totalStock(g)<=(+g.warn||0));
   const stockCost=DB.goods.reduce((a,g)=>a+totalStock(g)*g.buy,0);
   document.getElementById('homeStats').innerHTML=`
     <div class="stat"><div class="st"><span class="si b" style="background:var(--primary-soft);color:var(--primary)">${ic('box')}</span>商品种类</div><div class="sv">${n0(DB.goods.length)}<small>种</small></div></div>
@@ -1363,7 +1371,7 @@ function catStats(wh){
     if(!m[c]) m[c]={n:0,warn:0,qty:0};
     const st=qtyOf(g);
     m[c].n++; m[c].qty+=st;
-    if(st<=(+g.warn||0)) m[c].warn++;
+    if((+g.warn||0)>0 && st<=(+g.warn||0)) m[c].warn++;
   });
   return m;
 }
@@ -1375,7 +1383,7 @@ function renderCatGrid(mode){
   const qof=g=>wh?(g.stock[wh]||0):totalStock(g);
   const cats=catsList(), st=catStats(wh);
   const totQty=DB.goods.reduce((a,g)=>a+qof(g),0);
-  const totWarn=DB.goods.filter(g=>qof(g)<=(+g.warn||0)).length;
+  const totWarn=DB.goods.filter(g=>(+g.warn||0)>0 && qof(g)<=(+g.warn||0)).length;
   const open=isStock?'openStockCat':'openCat';
   let h;
   if(isStock){
@@ -1468,7 +1476,7 @@ function renderCatGoods(){
   const kw=((kwEl&&kwEl.value)||'').trim().toLowerCase();
   const pool=DB.goods.filter(g=>!curCat||g.cat===curCat);
   const qty=pool.reduce((a,g)=>a+totalStock(g),0);
-  const warn=pool.filter(g=>totalStock(g)<=(+g.warn||0)).length;
+  const warn=pool.filter(g=>(+g.warn||0)>0 && totalStock(g)<=(+g.warn||0)).length;
   if(bar){
     const del=(curCat&&curCat!=='未分类')?`<button class="btn ghost2 sm" style="color:#d92d20;white-space:nowrap" onclick="delCat('${esc(curCat)}')">${ic('trash')}删除分类</button>`:'';
     bar.innerHTML=`<div class="catbar"><div class="catbar-l"><div class="cb-t">${curCat||'全部商品'}</div><div class="cb-s">${pool.length} 个商品 · 库存合计 ${qty}${warn?' · 预警 '+warn:''}</div></div>${del}</div>`;
@@ -1604,7 +1612,7 @@ function renderStockCat(){
   const list=pool.slice(0,stockShown);
   const qof=g=>wh?(g.stock[wh]||0):totalStock(g);
   const total=pool.reduce((a,g)=>a+qof(g),0);
-  const warn=pool.filter(g=>qof(g)<=(+g.warn||0)).length;
+  const warn=pool.filter(g=>(+g.warn||0)>0 && qof(g)<=(+g.warn||0)).length;
   const head=`<div class="catbar"><div class="catbar-l"><div class="cb-t">${curStockCat||'全部库存'}</div><div class="cb-s">${pool.length} 个商品 · 合计 ${total}${wh?' · '+whName(wh):''}${warn?' · 预警 '+warn:''}</div></div></div>`;
   const cards=list.map(g=>{
     const rows=DB.warehouses.filter(w=>!wh||w.id===wh).map(w=>{
@@ -1906,6 +1914,7 @@ function openSheet(type,id){
   else if(type==='partner') h=partnerForm(id);
   else if(type==='company'){ curLogo=undefined; h=companyForm(); }
   else if(type==='cat') h=catForm();
+  else if(type==='import') h=importForm();
   s.innerHTML=h;
   document.getElementById('mask').classList.add('show');
   if(type==='goods'||type==='goodsEdit') initGoodsForm(id);
@@ -2053,7 +2062,7 @@ function orderForm(type){
   <div class="grid2">
     <div class="field"><label>仓库</label><select id="o_wh">${DB.warehouses.map(w=>`<option value="${w.id}">${w.name}</option>`).join('')}</select></div>
     <div class="field"><label>${isSale?'客户':'供应商'}</label>
-      <input id="o_partner" list="o_partner_list" placeholder="选已有的，或直接输入新名称" autocomplete="off" oninput="onPartnerChange()" onchange="onPartnerChange()" onblur="onPartnerChange()">
+      <input id="o_partner" list="o_partner_list" placeholder="选已有的，或直接输入新名称" autocomplete="off" oninput="onPartnerChange()" onchange="onPartnerChange()" onblur="onPartnerBlur()">
       <datalist id="o_partner_list">${partners.map(p=>`<option value="${esc(p.name)}"></option>`).join('')}</datalist>
       <div class="phint" id="o_phint" style="display:none"></div>
       <div class="hint">列表里没有就直接输入名称，保存单据时自动建档。</div>
@@ -2119,6 +2128,285 @@ function memoSet(type,pid,gid,price){
   DB.priceMemo[k]=Math.round(p*100)/100;
   DB.priceMemoTs[k]=Date.now();
 }
+
+/* ================= 批量导入：Excel 报价表 =================
+   支持「店名 / 品名 / 价格」三列的长表（A 列客户名只在块首写一次、下面留空也认）。
+   同名商品只建一次；不同客户的不同报价写进 priceMemo，开单选客户后自动带出。
+   解析 xlsx 不依赖任何库：自己解 ZIP 中央目录 + DecompressionStream 解 deflate。 */
+
+let curImport=null;
+
+function refCol(letters){
+  let n=0;
+  for(let i=0;i<letters.length;i++){ const c=letters.charCodeAt(i); if(c>=65&&c<=90) n=n*26+(c-64); }
+  return n-1;
+}
+
+/* 读 ZIP 中央目录，返回 { 文件名: {method, data} } */
+function zipEntries(u8){
+  let eocd=-1;
+  const min=Math.max(0,u8.length-66000);
+  for(let i=u8.length-22;i>=min;i--){
+    if(u8[i]===0x50&&u8[i+1]===0x4b&&u8[i+2]===0x05&&u8[i+3]===0x06){ eocd=i; break; }
+  }
+  if(eocd<0) throw new Error('不是有效的 xlsx 文件（也可能文件损坏）');
+  const dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength);
+  const count=dv.getUint16(eocd+10,true);
+  let off=dv.getUint32(eocd+16,true);
+  const out={};
+  const td=new TextDecoder('utf-8');
+  for(let k=0;k<count;k++){
+    if(dv.getUint32(off,true)!==0x02014b50) break;
+    const method=dv.getUint16(off+10,true);
+    const csize=dv.getUint32(off+20,true);
+    const nameLen=dv.getUint16(off+28,true);
+    const extraLen=dv.getUint16(off+30,true);
+    const cmtLen=dv.getUint16(off+32,true);
+    const lho=dv.getUint32(off+42,true);
+    const name=td.decode(u8.subarray(off+46,off+46+nameLen));
+    const ln=dv.getUint16(lho+26,true), le=dv.getUint16(lho+28,true);
+    const start=lho+30+ln+le;
+    out[name]={method, data:u8.subarray(start,start+csize)};
+    off+=46+nameLen+extraLen+cmtLen;
+  }
+  return out;
+}
+
+async function inflateRaw(data){
+  if(typeof DecompressionStream!=='function') throw new Error('这个浏览器版本太旧，读不了 xlsx。请用新版 Chrome / Edge 打开');
+  const ds=new DecompressionStream('deflate-raw');
+  const stream=new Blob([data]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function parseSheetXml(xml, ss){
+  const doc=new DOMParser().parseFromString(xml,'application/xml');
+  const rowsEl=doc.getElementsByTagNameNS('*','row');
+  const out=[];
+  for(let i=0;i<rowsEl.length;i++){
+    const r=rowsEl[i], ri=+r.getAttribute('r')-1;
+    const arr=[];
+    const cs=r.getElementsByTagNameNS('*','c');
+    for(let j=0;j<cs.length;j++){
+      const c=cs[j];
+      const letters=(c.getAttribute('r')||'').replace(/\d+/g,'');
+      const ci=letters?refCol(letters):j;
+      const t=c.getAttribute('t');
+      let v='';
+      if(t==='s'){
+        const vn=c.getElementsByTagNameNS('*','v')[0];
+        v=vn?(ss[+vn.textContent]||''):'';
+      } else if(t==='inlineStr'){
+        const ts=c.getElementsByTagNameNS('*','t');
+        let x=''; for(let k=0;k<ts.length;k++) x+=ts[k].textContent||''; v=x;
+      } else {
+        const vn=c.getElementsByTagNameNS('*','v')[0];
+        v=vn?(vn.textContent||''):'';
+      }
+      arr[ci]=String(v==null?'':v);
+    }
+    out[ri]=arr;
+  }
+  for(let i=0;i<out.length;i++) if(!out[i]) out[i]=[];
+  return out;
+}
+
+async function xlsxToRows(buf){
+  const u8=new Uint8Array(buf);
+  const entries=zipEntries(u8);
+  const getText=async n=>{
+    const e=entries[n]; if(!e) return null;
+    const raw=(e.method===0)?e.data:await inflateRaw(e.data);
+    return new TextDecoder('utf-8').decode(raw);
+  };
+  const ss=[];
+  const ssXml=await getText('xl/sharedStrings.xml');
+  if(ssXml){
+    const doc=new DOMParser().parseFromString(ssXml,'application/xml');
+    const sis=doc.getElementsByTagNameNS('*','si');
+    for(let i=0;i<sis.length;i++){
+      const ts=sis[i].getElementsByTagNameNS('*','t');
+      let t=''; for(let j=0;j<ts.length;j++) t+=ts[j].textContent||'';
+      ss.push(t);
+    }
+  }
+  const key=Object.keys(entries)
+    .filter(n=>/^xl\/worksheets\/sheet\d+\.xml$/.test(n))
+    .sort((a,b)=>+a.replace(/\D/g,'')-(+b.replace(/\D/g,'')))[0];
+  if(!key) throw new Error('这个文件里没有工作表');
+  return parseSheetXml(await getText(key), ss);
+}
+
+function csvToRows(text){
+  const out=[];
+  (text||'').replace(/\r\n/g,'\n').split('\n').forEach(line=>{
+    if(!line) { out.push([]); return; }
+    const cells=[]; let cur='', q=false;
+    for(let i=0;i<line.length;i++){
+      const ch=line[i];
+      if(q){
+        if(ch==='"'){ if(line[i+1]==='"'){ cur+='"'; i++; } else q=false; }
+        else cur+=ch;
+      } else {
+        if(ch==='"') q=true;
+        else if(ch===','||ch==='\t'){ cells.push(cur); cur=''; }
+        else cur+=ch;
+      }
+    }
+    cells.push(cur);
+    out.push(cells);
+  });
+  return out;
+}
+
+/* 「80/件」→ {price:80, unit:'件'} */
+function parsePriceCell(v){
+  let t=String(v==null?'':v).replace(/[,，\s]/g,'').replace(/^[¥￥$]/,'');
+  if(!t) return null;
+  const m=/^([\d.]+)(?:\/|每)?([^\d.\/]*)$/.exec(t);
+  if(!m) return null;
+  const p=parseFloat(m[1]);
+  if(!isFinite(p)||p<0) return null;
+  return {price:Math.round(p*10000)/10000, unit:String(m[2]||'').trim()};
+}
+
+function parseQuoteRows(rows){
+  let hdr=-1,cc=-1,cn=-1,cp=-1;
+  for(let i=0;i<Math.min(rows.length,15);i++){
+    const r=rows[i]||[]; let a=-1,b=-1,d=-1;
+    for(let j=0;j<r.length;j++){
+      const s=String(r[j]||'').trim(); if(!s) continue;
+      if(a<0 && /店\s*名|客户|往来单位|店铺|单位名称/.test(s)) a=j;
+      else if(b<0 && /品\s*名|商品|货品|产品/.test(s)) b=j;
+      else if(d<0 && /价\s*格|单价|报价/.test(s)) d=j;
+    }
+    if(a>=0&&b>=0&&d>=0){ hdr=i; cc=a; cn=b; cp=d; break; }
+  }
+  if(hdr<0) throw new Error('没找到表头，需要包含「店名」「品名」「价格」三列');
+  const recs=[]; let cur='';
+  for(let i=hdr+1;i<rows.length;i++){
+    const r=rows[i]||[];
+    const c=String(r[cc]||'').trim();
+    if(c) cur=c;
+    const n=String(r[cn]||'').trim();
+    if(!n||!cur) continue;
+    const pr=parsePriceCell(r[cp]);
+    if(!pr) continue;
+    recs.push({cust:cur, name:n, price:pr.price, unit:pr.unit});
+  }
+  return {recs, header:hdr};
+}
+
+function modeOfNums(obj){
+  let best=null,bn=-1;
+  Object.keys(obj||{}).forEach(k=>{ if(obj[k]>bn){ bn=obj[k]; best=k; } });
+  return best;
+}
+
+function importForm(){
+  return `<h3>批量导入商品与报价<span class="x" onclick="closeSheet()">${ic('x')}</span></h3>
+  <div class="hint">导入「店名 / 品名 / 价格」三列的表。同名商品只建一次，同一商品给不同客户的不同报价会记成该客户的专属价，开单选客户后自动带出。</div>
+  <div class="field"><label>选择 Excel 文件</label>
+    <input type="file" id="impFile" accept=".xlsx,.csv" onchange="impPick(this)" style="display:block;width:100%;font-size:13px">
+  </div>
+  <div id="impBox"><div class="empty" style="padding:16px 0">还没有选择文件</div></div>`;
+}
+
+async function impPick(inp){
+  const f=inp.files&&inp.files[0]; if(!f) return;
+  const box=document.getElementById('impBox');
+  if(!box) return;
+  box.innerHTML='<div class="empty" style="padding:16px 0">正在读取…</div>';
+  try{
+    const buf=await f.arrayBuffer();
+    const rows=/\.csv$/i.test(f.name)?csvToRows(new TextDecoder('utf-8').decode(buf)):await xlsxToRows(buf);
+    const parsed=parseQuoteRows(rows);
+    if(!parsed.recs.length) throw new Error('没解析到有效数据行');
+    curImport=parsed;
+    renderImpPreview();
+  }catch(e){
+    curImport=null;
+    box.innerHTML='<div class="empty" style="padding:16px 0">读取失败：'+esc(e&&e.message?e.message:String(e))+'</div>';
+  }
+}
+
+function renderImpPreview(){
+  const box=document.getElementById('impBox'); if(!box||!curImport) return;
+  const recs=curImport.recs;
+  const custs=[], goods=[]; const cset={}, gset={};
+  recs.forEach(r=>{
+    if(!cset[r.cust]){ cset[r.cust]=1; custs.push(r.cust); }
+    if(!gset[r.name]){ gset[r.name]=1; goods.push(r.name); }
+  });
+  const existC=DB.customers.filter(c=>cset[c.name]).length;
+  const existG=DB.goods.filter(g=>gset[g.name]).length;
+  const uniqN=new Set(recs.map(r=>r.cust+'|'+r.name)).size;
+  const dupN=recs.length-uniqN;
+  const sample=recs.slice(0,6).map(r=>
+    `<tr><td style="padding:4px 2px;border-bottom:1px solid var(--line)">${esc(r.cust)}</td><td style="border-bottom:1px solid var(--line)">${esc(r.name)}</td><td style="border-bottom:1px solid var(--line)">${r.price}${r.unit?'/'+esc(r.unit):''}</td></tr>`).join('');
+  box.innerHTML=`
+    <div class="kv"><span class="k">识别到</span><span class="v">${recs.length} 条报价 · ${custs.length} 个客户 · ${goods.length} 个商品</span></div>
+    <div class="kv"><span class="k">会新建</span><span class="v">${custs.length-existC} 个客户 · ${goods.length-existG} 个商品</span></div>
+    <div class="kv"><span class="k">已存在</span><span class="v">${existC} 个客户 · ${existG} 个商品（直接复用，不重复建）</span></div>
+    ${dupN>0?`<div class="kv"><span class="k">重复行</span><span class="v">${dupN} 条（同一客户同一商品出现多次，只保留最后一条）</span></div>`:''}
+    <div style="margin-top:8px;font-size:12px;color:var(--sub)">前几条预览：</div>
+    <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:4px">
+      <tr style="color:var(--sub)"><td style="padding:4px 2px">客户</td><td>商品</td><td>价格</td></tr>${sample}
+    </table>
+    <button class="btn block" style="margin-top:12px" onclick="impApply()">确认导入 ${uniqN} 条</button>
+    <div style="font-size:12px;line-height:1.7;color:var(--sub);margin-top:8px">导入只新增，不会改动已有商品的价格和库存。重复导入同一张表也安全，报价会按最新一次覆盖。</div>`;
+}
+
+function impApply(){
+  if(!curImport||!curImport.recs.length){ toast('没有可导入的数据'); return; }
+  const recs=curImport.recs;
+  const custs={}, goods={};
+  recs.forEach(r=>{
+    (custs[r.cust]=custs[r.cust]||[]).push(r);
+    const g=goods[r.name]=goods[r.name]||{prices:{},units:{}};
+    g.prices[r.price]=(g.prices[r.price]||0)+1;
+    if(r.unit) g.units[r.unit]=(g.units[r.unit]||0)+1;
+  });
+  let nc=0,ng=0;
+  const custId={}, goodId={};
+  Object.keys(custs).forEach(name=>{
+    let c=DB.customers.find(x=>x.name===name);
+    if(!c){ c={id:uid('c'),name,contact:'',phone:'',addr:'',note:''}; DB.customers.push(c); nc++; }
+    custId[name]=c.id;
+  });
+  if(!DB.priceMemo) DB.priceMemo={};
+  if(!DB.priceMemoTs) DB.priceMemoTs={};
+  if(!DB.priceUnit) DB.priceUnit={};
+  Object.keys(goods).forEach(name=>{
+    const o=goods[name];
+    let g=DB.goods.find(x=>x.name===name);
+    if(!g){
+      let unit=modeOfNums(o.units)||'个';
+      const mp=modeOfNums(o.prices);
+      const sale=mp==null?0:parseFloat(mp);
+      let code='P'+(1000+DB.goods.length+1);
+      while(DB.goods.some(x=>x.code===code)) code='P'+(1001+DB.goods.length+Math.floor(Math.random()*900));
+      g={id:uid('g'), name, code, cat:'未分类', brand:'', barcode:'', unit, spec:'',
+         buy:0, sale:isFinite(sale)?sale:0, warn:0, note:'', stock:{}};
+      DB.warehouses.forEach(w=>g.stock[w.id]=0);
+      DB.goods.push(g); ng++;
+    }
+    goodId[name]=g.id;
+  });
+  recs.forEach(r=>{
+    const k=memoKey('sale', custId[r.cust], goodId[r.name]);
+    DB.priceMemo[k]=r.price;
+    DB.priceMemoTs[k]=Date.now();
+    if(r.unit) DB.priceUnit[k]=r.unit; else delete DB.priceUnit[k];
+  });
+  save();
+  curImport=null;
+  closeSheet();
+  if(typeof renderGoods==='function') renderGoods();
+  const uniqN=new Set(recs.map(r=>r.cust+'|'+r.name)).size;
+  toast('导入完成：新增 '+ng+' 个商品、'+nc+' 个客户，'+uniqN+' 条客户报价'
+    +(recs.length>uniqN?'（'+recs.length+' 行里 '+uniqN+' 条不同，其余重复已合并）':''),'long');
+}
 /* 单据里当前选中的往来单位（支持直接输入的新名字，此时 id 为空） */
 function curPartner(){
   const el=document.getElementById('o_partner'); if(!el) return null;
@@ -2133,10 +2421,14 @@ function curPartnerId(){
 }
 /* 该商品在这个往来单位下的带出价：先用专属价，没有再用商品档案默认价 */
 function quotePrice(type,gid,pid){
-  const m=memoPrice(type,pid,gid);
-  if(m!=null) return {price:m, memo:true};
   const g=goodById(gid)||{};
-  return {price:(type==='sale'?(+g.sale||0):(+g.buy||0)), memo:false};
+  const m=memoPrice(type,pid,gid);
+  if(m!=null){
+    /* 报价表里同一商品可能按件、按卷、按个分别报价，单位跟着报价走 */
+    const u=(pid&&DB.priceUnit)?DB.priceUnit[memoKey(type,pid,gid)]:'';
+    return {price:m, memo:true, unit:u||g.unit||''};
+  }
+  return {price:(type==='sale'?(+g.sale||0):(+g.buy||0)), memo:false, unit:g.unit||''};
 }
 /* 换客户/供应商后，把还没被手工改过价的行重新带价 */
 let _pcTimer=null;
@@ -2144,17 +2436,24 @@ function onPartnerChange(){
   if(_pcTimer) clearTimeout(_pcTimer);
   _pcTimer=setTimeout(applyPartnerPrice, 260);
 }
-function applyPartnerPrice(){
+function onPartnerBlur(){
+  /* 离开输入框时如果还没匹配到老客户，就按「新客户」重算一次，别把上一个客户的价带过去 */
+  if(_pcTimer) clearTimeout(_pcTimer);
+  applyPartnerPrice(true);
+}
+function applyPartnerPrice(force){
   const p=curPartner();
   const raw=((document.getElementById('o_partner')||{}).value||'').trim();
-  /* 输入了一半、还没匹配到老客户时先不动价，避免打字过程中价格乱跳 */
-  if(raw && p && !p.id) { updPartnerHint(); return; }
+  /* 输入了一半、还没匹配到老客户时先不动价，避免打字过程中价格乱跳；失焦（force）时例外 */
+  if(!force && raw && p && !p.id) { updPartnerHint(); return; }
   const pid=p?p.id:'';
   let changed=false;
   curItems.forEach(it=>{
     if(!it.auto) return;
     const q=quotePrice(curOrderType, it.goodsId, pid);
-    if(q.price!==it.price || !!q.memo!==!!it.memo){ it.price=q.price; it.memo=q.memo; changed=true; }
+    if(q.price!==it.price || !!q.memo!==!!it.memo || (q.unit&&q.unit!==it.unit)){
+      it.price=q.price; it.memo=q.memo; if(q.unit) it.unit=q.unit; changed=true;
+    }
   });
   if(changed) renderItems();
   updPartnerHint();
@@ -2263,7 +2562,7 @@ function addItem(gid){
     updLineAmt(idx); updTotal(); return;
   }
   const q=quotePrice(curOrderType,gid,curPartnerId());
-  curItems.push({goodsId:gid,name:g.name,unit:g.unit,price:q.price,qty:1,auto:true,memo:q.memo});
+  curItems.push({goodsId:gid,name:g.name,unit:q.unit||g.unit,price:q.price,qty:1,auto:true,memo:q.memo});
   const i=curItems.length-1;
   const box=document.getElementById('o_items');
   /* 只追加一行，不重绘整张明细，点选商品不再卡 */
@@ -3164,7 +3463,7 @@ function mergeDb(local, remote){
     }
     out[k]=merged;
   });
-  ['priceMemo','priceMemoTs'].forEach(k=>{ out[k]=Object.assign({}, (remote&&remote[k])||{}, (local&&local[k])||{}); });
+  ['priceMemo','priceMemoTs','priceUnit'].forEach(k=>{ out[k]=Object.assign({}, (remote&&remote[k])||{}, (local&&local[k])||{}); });
   out.categories=[...new Set([...((remote&&remote.categories)||[]), ...((local&&local.categories)||[])])];
   out.company=Object.assign({}, (local&&local.company)||{}, (remote&&remote.company)||{});
   return out;
