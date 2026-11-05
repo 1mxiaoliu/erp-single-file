@@ -462,8 +462,8 @@
   .prevbar em{font-style:normal; color:#98a2b3;}
   @media (min-width:521px){ .prevbar em{display:none;} }
   .prevbox .inv-paper{background:#fff; border-radius:9px; padding:14px; min-width:600px; box-shadow:0 1px 3px rgba(16,24,40,.08);}
-  /* 默认纸张：得力 241mm×279mm 三联二等分 → 每份 241×139.5mm（可在单据设置里改） */
-  @page{margin:6mm; size:241mm 139.5mm;}
+  /* 默认纸张：A4 横向（可在单据设置里改成 241×139.5mm 三联单等） */
+  @page{margin:6mm; size:A4 landscape;}
   @media print{
     html,body{background:#fff !important; height:auto !important; overflow:visible !important; padding:0 !important; margin:0 !important;}
     /* 只有点了「打印单据」才把界面藏起来；平时按 Ctrl+P 不会印出空白页 */
@@ -2618,7 +2618,7 @@ function invoiceForm(orderId){
     <button class="btn" onclick="saveInvoice('${orderId||''}')">保存单据</button>
   </div>
   <div class="prevbox" id="i_prevbox" hidden>
-    <div class="prevbar"><span>打印效果预览（A4 单据）<em>· 手机上可左右滑动</em></span><button class="btn ghost2 sm" onclick="printInvDraft()">打印这张</button></div>
+    <div class="prevbar"><span>打印效果预览 · 纸张 <b id="pvPaper" onclick="quickPaper()" title="点一下切换纸张" style="color:var(--primary);cursor:pointer;border-bottom:1px dashed currentColor">${paperName()}</b><em>（点纸型可切换）</em></span><button class="btn ghost2 sm" onclick="printInvDraft()">打印这张</button></div>
     <div class="inv-paper" id="i_prev"></div>
   </div>`;
 }
@@ -2875,16 +2875,16 @@ function companyForm(){
     <div class="hint">建议用正方形、背景浅色的图；上传后自动裁成方形并转成黑白单色，打印干净、不费彩墨。</div>
   </div>
   <div class="field"><label>公司名称（打印抬头）</label><input id="co_name" value="${esc(c.name||'')}" placeholder="如：上海服装有限公司"></div>
-  <div class="field"><label>副标题 / 经营范围</label><input id="co_sub" value="${esc(c.sub||'')}" placeholder="如：酒店用品 · 清洁用品 · 一次性耗材"></div>
+  <div class="field"><label>公司名下面那行小字（副标题 / 经营范围）</label><input id="co_sub" value="${esc(c.sub||'')}" placeholder="如：酒店用品 · 清洁用品 · 一次性耗材（可留空）"></div>
   <div class="field"><label>单据标题</label><input id="co_doc" value="${esc(c.docTitle||'送货单（结账单）')}" placeholder="送货单（结账单）"></div>
   <div class="field"><label>打印纸张</label>
     <select id="co_paper">
-      <option value="three" ${(c.paper||'three')==='three'?'selected':''}>241×139.5mm 三联二等分（默认）</option>
+      <option value="a4l" ${(c.paper||'a4l')==='a4l'?'selected':''}>A4 横向（普通 A4 纸，推荐）</option>
+      <option value="three" ${c.paper==='three'?'selected':''}>241×139.5mm（三联二等分针式纸）</option>
       <option value="a4" ${c.paper==='a4'?'selected':''}>A4 纵向</option>
       <option value="a5" ${c.paper==='a5'?'selected':''}>A5 横向</option>
-      <option value="a4l" ${c.paper==='a4l'?'selected':''}>A4 横向</option>
     </select>
-    <div class="hint">默认按得力 241×279mm 三联二等分纸，每份 241×139.5mm；打印时请把纸张选成同名规格，否则会被缩放。</div>
+    <div class="hint">用普通 A4 纸就选「A4 横向」，打印对话框里的「纸张」选 A4、「布局 / 方向」选横向。两边不一致会出现内容被竖着印或被缩小。</div>
   </div>
   <div class="field"><label>地址</label><input id="co_addr" value="${esc(c.addr||'')}" placeholder="选填"></div>
   <div class="grid2">
@@ -2903,7 +2903,7 @@ function saveCompany(){
   DB.company={name:document.getElementById('co_name').value.trim()||'我的公司',
     sub:document.getElementById('co_sub').value.trim(),
     docTitle:document.getElementById('co_doc').value.trim()||'送货单（结账单）',
-    paper:document.getElementById('co_paper').value||'three',
+    paper:document.getElementById('co_paper').value||'a4l',
     addr:document.getElementById('co_addr').value.trim(),
     phone:document.getElementById('co_phone').value.trim(),
     web:document.getElementById('co_web').value.trim(),
@@ -2964,13 +2964,30 @@ function makeLogo(img){
 }
 function resetLogo(){ curLogo=DEF_LOGO; paintLogoPrev(); }
 function clearLogo(){ curLogo=null; paintLogoPrev(); }
+/* 纸型显示名 */
+function paperName(p){
+  const n={three:'241×139.5mm 三联单', a4:'A4 纵向', a5:'A5 横向', a4l:'A4 横向'};
+  const k=p||((DB.company&&DB.company.paper)||'a4l');
+  return n[k]||n.a4l;
+}
 /* 按设置切换打印纸张（@page 只能通过样式表动态改） */
 function applyPage(){
-  const p=((DB.company&&DB.company.paper)||'three');
+  const p=((DB.company&&DB.company.paper)||'a4l');
   const map={three:'241mm 139.5mm', a4:'A4 portrait', a5:'A5 landscape', a4l:'A4 landscape'};
   let el=document.getElementById('pageCss');
   if(!el){ el=document.createElement('style'); el.id='pageCss'; document.head.appendChild(el); }
-  el.textContent='@page{ size:'+(map[p]||map.three)+'; margin:6mm; }';
+  el.textContent='@page{ size:'+(map[p]||map.a4l)+'; margin:6mm; }';
+  const tag=document.getElementById('pvPaper'); if(tag) tag.textContent=paperName(p);
+}
+/* 预览栏点纸型：在 A4 横向与 241×139.5 三联单之间来回切 */
+function quickPaper(){
+  const cur=((DB.company&&DB.company.paper)||'a4l');
+  const next=(cur==='three')?'a4l':'three';
+  DB.company=DB.company||{}; DB.company.paper=next;
+  applyPage(); save();
+  const sel=document.getElementById('co_paper'); if(sel) sel.value=next;
+  toast(next==='three' ? '已切换：241×139.5mm 三联单（打印对话框里的纸张也要选同名规格）'
+                       : '已切换：A4 横向（打印对话框选 A4、方向选横向）', 'long');
 }
 
 /* 数据 */
