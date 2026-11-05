@@ -1,7 +1,7 @@
 /* 云进销存 · Service Worker
    只缓存"外壳"（HTML/图标/manifest），不缓存任何接口数据。
    断网时照样能打开界面继续开单，改动排进队列，联网后自动补传。 */
-const CACHE = 'erp-shell-v1';
+const CACHE = 'erp-shell-v2';
 const SHELL = ['/', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/icon-180.png'];
 
 self.addEventListener('install', e => {
