@@ -743,7 +743,7 @@
     <section class="view" id="v-danger">
       <div class="card">
         <div class="h"><div class="t">谨慎操作</div></div>
-        <div style="font-size:12.5px;line-height:1.8;color:var(--ink-2);margin-bottom:14px">下面两个按钮都会删除数据，且不能撤销。操作前建议先到「备份恢复」导出一份。</div>
+        <div style="font-size:12.5px;line-height:1.8;color:var(--ink-2);margin-bottom:14px">下面两个按钮都会删除数据，且不能撤销。操作前建议先到「备份恢复」导出一份。<br>如果只是刚才批量导入导错了，先到「商品 → 导入」里点撤销，不用清空整个商品库。</div>
         <button class="btn line block" style="margin-bottom:10px;color:#d92d20;border-color:#fbd9d5" onclick="clearAllGoods()">清空全部商品</button>
         <button class="btn danger block" onclick="resetData()">清空全部数据 / 重新开始</button>
       </div>
@@ -783,7 +783,7 @@ const KEY='erp_free_v1';
 let LS_OK=true;
 try{ localStorage.setItem('__ls_test__','1'); localStorage.removeItem('__ls_test__'); }catch(e){ LS_OK=false; }
 const BOOT_T=Date.now();
-/* 默认单据 LOGO：内置黑白单色版（开票/打印按黑白出，不上彩色墨水），可在「公司信息 / LOGO」里替换 */
+/* 单据 LOGO：优先用你自己上传的图。默认不带任何 LOGO，抬头只显示公司名 */
 const DEF_LOGO='';
 /* ---------- 图片存储：内存缓存 + IndexedDB（localStorage 兜底）
    浏览器 localStorage 只有约 5MB，存几张照片就满；图片改放容量大得多的 IndexedDB，
@@ -1011,6 +1011,8 @@ function load(){
       d.priceMemo=d.priceMemo||{};
       d.priceMemoTs=d.priceMemoTs||{};
       d.priceUnit=d.priceUnit||{};
+      /* 批量导入的批次记录：用于「撤销这次导入」 */
+      d.impBatches=d.impBatches||[];
       /* 旧版把 base64 塞在商品里：搬到内存+待写队列，并从主数据删除，主数据立刻变小 */
       d.goods.forEach(g=>{
         if(typeof g.img==='string' && g.img.indexOf('data:')===0){
@@ -2052,7 +2054,15 @@ function saveGoods(id){
 }
 function editGoods(id){ openSheet('goodsEdit',id); }
 function delGoods(id){ if(!confirm('确认删除该商品？')) return; DB.goods=DB.goods.filter(g=>g.id!==id); imgDel(id); save(); closeSheet(); renderGoods(); toast('已删除'); }
-function clearAllGoods(){ if(!confirm('确认清空全部商品？此操作不可恢复，建议先到「我的 - 导出备份」。')) return; DB.goods.forEach(g=>imgDel(g.id)); DB.goods=[]; save(); renderGoods(); fillCat(); toast('已清空全部商品'); }
+function clearAllGoods(){
+  if(!confirm('确认清空全部商品？\n\n会同时清掉所有客户专属报价，商品图片也一起删除。\n这个操作不能撤销，建议先到「导出备份」存一份。')) return;
+  DB.goods.forEach(g=>imgDel(g.id));
+  DB.goods=[];
+  /* 商品没了，挂在商品 id 上的专属价全是死键，一起清掉，免得重导后串价 */
+  DB.priceMemo={}; DB.priceMemoTs={}; DB.priceUnit={};
+  DB.impBatches=[];
+  save(); renderGoods(); fillCat(); toast('已清空全部商品和客户专属报价');
+}
 
 /* 单据 */
 function orderForm(type){
@@ -2135,6 +2145,9 @@ function memoSet(type,pid,gid,price){
    解析 xlsx 不依赖任何库：自己解 ZIP 中央目录 + DecompressionStream 解 deflate。 */
 
 let curImport=null;
+/* 导入弹层的两种模式：报价表（店名/品名/价格）与库存表（品名/库存） */
+let impMode='quote';
+let curStock=null;
 
 function refCol(letters){
   let n=0;
@@ -2304,12 +2317,181 @@ function modeOfNums(obj){
 }
 
 function importForm(){
-  return `<h3>批量导入商品与报价<span class="x" onclick="closeSheet()">${ic('x')}</span></h3>
-  <div class="hint">导入「店名 / 品名 / 价格」三列的表。同名商品只建一次，同一商品给不同客户的不同报价会记成该客户的专属价，开单选客户后自动带出。</div>
+  const isQ=impMode==='quote';
+  const whs=DB.warehouses||[];
+  return `<h3>批量导入<span class="x" onclick="closeSheet()">${ic('x')}</span></h3>
+  <div class="seg tight">
+    <button class="${isQ?'on':''}" onclick="impSwitch('quote')">商品与报价</button>
+    <button class="${isQ?'':'on'}" onclick="impSwitch('stock')">库存</button>
+  </div>
+  <div class="hint">${isQ
+    ? '导入「店名 / 品名 / 价格」三列的表。同名商品只建一次，同一商品给不同客户的不同报价会记成该客户的专属价，开单选客户后自动带出。'
+    : '导入「品名 / 库存」两列的表，不需要店名。已有的商品直接改库存，没有的会自动建商品档案（分类为「未分类」）。'}</div>
+  ${isQ?'':`<div class="field"><label>导入到哪个仓库</label>
+    <select id="impWh">${whs.map(w=>`<option value="${w.id}"${w.def?' selected':''}>${esc(w.name)}</option>`).join('')}</select>
+  </div>
+  <div class="field"><label>库存怎么算</label>
+    <select id="impStockMode">
+      <option value="set">覆盖 —— 用表里的数直接重设</option>
+      <option value="add">累加 —— 在现有库存上加上去</option>
+    </select>
+  </div>`}
   <div class="field"><label>选择 Excel 文件</label>
     <input type="file" id="impFile" accept=".xlsx,.csv" onchange="impPick(this)" style="display:block;width:100%;font-size:13px">
   </div>
-  <div id="impBox"><div class="empty" style="padding:16px 0">还没有选择文件</div></div>`;
+  <div id="impBox"><div class="empty" style="padding:16px 0">还没有选择文件</div></div>
+  ${impHistoryHtml()}`;
+}
+function impSwitch(m){
+  if(impMode===m) return;
+  impMode=m; curImport=null; curStock=null;
+  const s=document.getElementById('sheet'); if(s) s.innerHTML=importForm();
+}
+
+/* 「品名 / 库存」两列的表：与店名无关，同名商品只取最后一行 */
+function parseStockRows(rows){
+  let hdr=-1,cn=-1,cq=-1,cu=-1;
+  for(let i=0;i<Math.min(rows.length,15);i++){
+    const r=rows[i]||[]; let b=-1,q=-1,u=-1;
+    for(let j=0;j<r.length;j++){
+      const s=String(r[j]||'').trim(); if(!s) continue;
+      if(b<0 && /品\s*名|商品名称|商品|货品|产品名称|产品|名称/.test(s)) b=j;
+      else if(q<0 && /库\s*存|结\s*存|在\s*库|实\s*存|数\s*量/.test(s)) q=j;
+      else if(u<0 && /^单\s*位$|规\s*格/.test(s)) u=j;
+    }
+    if(b>=0&&q>=0){ hdr=i; cn=b; cq=q; cu=u; break; }
+  }
+  const fuzzy=hdr<0;
+  if(fuzzy){ cn=0; cq=-1; cu=-1; }   /* 没表头：第一列品名，最后一列数字当库存 */
+  const skip=/^(合计|小计|总计|总合计|备注|说明|注)$/;
+  const recs=[]; let bad=0;
+  for(let i=(fuzzy?0:hdr+1);i<rows.length;i++){
+    const r=rows[i]||[];
+    const name=String(r[cn]||'').trim();
+    if(!name) continue;
+    if(skip.test(name)) continue;
+    let qv=(cq>=0?r[cq]:null);
+    if(cq<0){
+      qv=null;
+      for(let j=r.length-1;j>cn;j--){ if(parsePriceCell(r[j])){ qv=r[j]; break; } }
+    }
+    const pq=parsePriceCell(qv);
+    if(!pq){ bad++; continue; }
+    recs.push({name, qty:Math.round(pq.price*10000)/10000,
+      unit:(cu>=0?String(r[cu]||'').trim():pq.unit||'')});
+  }
+  return {recs, bad, hdr, fuzzy};
+}
+
+/* 导入批次的历史列表：每一次都能整体撤回 */
+function impHistoryHtml(){
+  const all=DB.impBatches||[];
+  const live=all.filter(b=>!b.undone);
+  if(!live.length) return '';
+  const p=stP2;
+  const fmt=ts=>{ const d=new Date(ts); return (d.getMonth()+1)+'月'+d.getDate()+'日 '+p(d.getHours())+':'+p(d.getMinutes()); };
+  const rows=live.slice(0,6).map(b=>{
+    const i=all.indexOf(b);
+    return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)">
+      <div style="min-width:0;flex:1">
+        <div style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(b.file||'报价表')}</div>
+        <div style="font-size:12px;color:var(--sub)">${fmt(b.ts)} · ${b.rows||0} 行 · ${b.type==='stock'
+          ? ((b.items||[]).length+' 个商品'+(b.add?' · 累加':' · 覆盖'))
+          : ('新建 '+(b.goods||[]).filter(g=>g.isNew).length+' 商品 / '+(b.custs||[]).filter(c=>c.isNew).length+' 客户')}</div>
+      </div>
+      <button class="btn ghost2 sm" style="flex-shrink:0" onclick="undoImport(${i})">${ic('trash')}撤销</button>
+    </div>`;
+  }).join('');
+  return `<div style="margin-top:18px;padding-top:12px;border-top:1px solid var(--line)">
+    <div style="font-size:13px;font-weight:600;margin-bottom:4px">最近的导入（可撤销）</div>
+    <div class="hint" style="margin-bottom:4px">撤销会删掉那次导入新建、且还没开过单的商品和客户，被覆盖的客户报价还原成导入前的值。开过单的商品会保留。</div>
+    ${rows}
+  </div>`;
+}
+
+function undoImport(i){
+  const b=(DB.impBatches||[])[i];
+  if(!b||b.undone){ toast('这条记录已经撤销过'); return; }
+  if(b.type==='stock') return undoStockImport(i);
+
+  if(!confirm('撤销这次导入？\n\n'+b.file+'\n'+(b.rows||0)+' 行\n\n会删掉这次新建的商品和客户（已经开过单的会保留），并把被覆盖的客户报价还原。此操作不可再恢复。')) return;
+  /* 单据引用检查：开过单的商品/客户不能直接删 */
+  const usedG={}, usedC={};
+  (DB.invoices||[]).forEach(v=>{
+    if(v.partnerId) usedC[v.partnerId]=1;
+    (v.items||[]).forEach(it=>{ if(it.goodsId) usedG[it.goodsId]=1; });
+  });
+  [...(DB.sale||[]),...(DB.purchase||[])].forEach(v=>{
+    if(v.partnerId) usedC[v.partnerId]=1;
+    (v.items||[]).forEach(it=>{ if(it.goodsId) usedG[it.goodsId]=1; });
+  });
+  let dg=0,dc=0,keep=0,rm=0,rs=0;
+  const gDel={};
+  (b.goods||[]).forEach(x=>{
+    if(!x.isNew) return;
+    if(usedG[x.id]){ keep++; return; }
+    gDel[x.id]=1; dg++;
+  });
+  (b.custs||[]).forEach(x=>{
+    if(!x.isNew) return;
+    if(usedC[x.id]){ keep++; return; }
+    DB.customers=DB.customers.filter(c=>c.id!==x.id); dc++;
+  });
+  if(dg){
+    DB.goods=DB.goods.filter(g=>!gDel[g.id]);
+    Object.keys(DB.priceMemo||{}).forEach(k=>{ if(gDel[k.split('|')[2]]){ delete DB.priceMemo[k]; delete DB.priceMemoTs[k]; delete DB.priceUnit[k]; rm++; } });
+  }
+  /* 还原被这次导入覆盖的报价 */
+  (b.memo||[]).forEach(m=>{
+    if(gDel[m.k.split('|')[2]]) return;
+    if(m.has){ DB.priceMemo[m.k]=m.p; if(m.ts!=null) DB.priceMemoTs[m.k]=m.ts; else delete DB.priceMemoTs[m.k]; }
+    else { delete DB.priceMemo[m.k]; delete DB.priceMemoTs[m.k]; rs++; }
+    if(m.hasU) DB.priceUnit[m.k]=m.u; else delete DB.priceUnit[m.k];
+  });
+  /* 客户被删后，其名下的专属价也一并清掉，避免留下孤儿键 */
+  const alive={}; DB.customers.forEach(c=>alive[c.id]=1);
+  Object.keys(DB.priceMemo||{}).forEach(k=>{
+    const p=k.split('|');
+    if(p[1] && !alive[p[1]]){ delete DB.priceMemo[k]; delete DB.priceMemoTs[k]; delete DB.priceUnit[k]; rm++; }
+  });
+  b.undone=true;
+  save();
+  closeSheet();
+  if(typeof renderGoods==='function') renderGoods();
+  if(typeof renderPartner==='function'){ try{ renderPartner(); }catch(e){} }
+  toast('已撤销：删除 '+dg+' 商品 / '+dc+' 客户 / '+rm+' 条专属价，还原 '+rs+' 条报价'
+    +(keep?'；'+keep+' 个已开过单的保留下来':''));
+}
+
+/* 撤销一次库存导入：新建的商品删掉，改过的库存还原 */
+function undoStockImport(i){
+  const b=(DB.impBatches||[])[i];
+  if(!b||b.undone){ toast('这条记录已经撤销过'); return; }
+  if(!confirm('撤销这次库存导入？\n\n'+b.file+'\n'+(b.items||[]).length+' 个商品\n\n这次新建的商品会被删掉（已经开过单的保留），改过的库存还原成导入前的数。')) return;
+  const usedG={};
+  (DB.invoices||[]).forEach(v=>(v.items||[]).forEach(it=>{ if(it.goodsId) usedG[it.goodsId]=1; }));
+  [...(DB.sale||[]),...(DB.purchase||[])].forEach(v=>(v.items||[]).forEach(it=>{ if(it.goodsId) usedG[it.goodsId]=1; }));
+  let dg=0,rs=0,keep=0;
+  (b.items||[]).forEach(x=>{
+    const g=DB.goods.find(y=>y.id===x.id);
+    if(!g) return;
+    if(x.isNew){
+      if(usedG[x.id]){ keep++; return; }
+      DB.goods=DB.goods.filter(y=>y.id!==x.id);
+      try{ imgDel(x.id); }catch(e){}
+      dg++;
+    } else {
+      if(!g.stock) g.stock={};
+      g.stock[x.wh]=x.prev;
+      rs++;
+    }
+  });
+  b.undone=true;
+  save();
+  closeSheet();
+  if(typeof renderGoods==='function') renderGoods();
+  if(typeof renderStock==='function'){ try{ renderStock(); }catch(e){} }
+  toast('已撤销：删除 '+dg+' 个商品，还原 '+rs+' 个商品的库存'+(keep?'；'+keep+' 个已开过单的保留':''));
 }
 
 async function impPick(inp){
@@ -2320,35 +2502,153 @@ async function impPick(inp){
   try{
     const buf=await f.arrayBuffer();
     const rows=/\.csv$/i.test(f.name)?csvToRows(new TextDecoder('utf-8').decode(buf)):await xlsxToRows(buf);
-    const parsed=parseQuoteRows(rows);
-    if(!parsed.recs.length) throw new Error('没解析到有效数据行');
-    curImport=parsed;
-    renderImpPreview();
+    if(impMode==='stock'){
+      const p=parseStockRows(rows);
+      if(!p.recs.length) throw new Error('没解析到有效数据行，需要「品名」和「库存」两列');
+      p.fileName=f.name;
+      curStock=p;
+      renderStockPreview();
+    } else {
+      const parsed=parseQuoteRows(rows);
+      if(!parsed.recs.length) throw new Error('没解析到有效数据行');
+      parsed.fileName=f.name;
+      curImport=parsed;
+      renderImpPreview();
+    }
   }catch(e){
-    curImport=null;
+    curImport=null; curStock=null;
     box.innerHTML='<div class="empty" style="padding:16px 0">读取失败：'+esc(e&&e.message?e.message:String(e))+'</div>';
   }
+}
+
+/* 库存表预览：多少条、多少会新建、重复行怎么合并 */
+function renderStockPreview(){
+  const box=document.getElementById('impBox'); if(!box||!curStock) return;
+  const recs=curStock.recs;
+  const seen={}, uniq=[];
+  recs.forEach(r=>{ if(seen[r.name]==null){ seen[r.name]=uniq.length; uniq.push(r); } else uniq[seen[r.name]]=r; });
+  const names={}; uniq.forEach(r=>names[r.name]=1);
+  const exist=DB.goods.filter(g=>names[g.name]).length;
+  const dupN=recs.length-uniq.length;
+  const whSel=document.getElementById('impWh');
+  const whId=whSel?whSel.value:(DB.warehouses[0]&&DB.warehouses[0].id);
+  const wh=DB.warehouses.find(w=>w.id===whId)||{};
+  const sample=uniq.slice(0,6).map(r=>{
+    const g=DB.goods.find(x=>x.name===r.name);
+    return `<tr>
+      <td style="padding:4px 2px;border-bottom:1px solid var(--line)">${esc(r.name)}</td>
+      <td style="border-bottom:1px solid var(--line);text-align:right">${n0(r.qty)}${r.unit?' '+esc(r.unit):''}</td>
+      <td style="border-bottom:1px solid var(--line);color:var(--sub);text-align:right">${g?'已有':'新建'}</td>
+    </tr>`;
+  }).join('');
+  box.innerHTML=`
+    <div class="kv"><span class="k">识别到</span><span class="v">${uniq.length} 个商品${recs.length>uniq.length?'（表里 '+recs.length+' 行，同名取最后一行）':''}</span></div>
+    <div class="kv"><span class="k">已存在</span><span class="v">${exist} 个（直接改库存）</span></div>
+    <div class="kv"><span class="k">会新建</span><span class="v">${uniq.length-exist} 个商品档案</span></div>
+    <div class="kv"><span class="k">导入到</span><span class="v">${esc(wh.name||'默认仓库')}</span></div>
+    ${curStock.bad?`<div class="kv"><span class="k">跳过</span><span class="v">${curStock.bad} 行（库存不是数字）</span></div>`:''}
+    ${curStock.fuzzy?'<div class="kv"><span class="k">提示</span><span class="v">没找到表头，按「第一列品名、最后一列数字为库存」识别</span></div>':''}
+    <div style="margin-top:8px;font-size:12px;color:var(--sub)">前几条预览：</div>
+    <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:4px">
+      <tr style="color:var(--sub)"><td style="padding:4px 2px">品名</td><td style="text-align:right">库存</td><td style="text-align:right">处理</td></tr>${sample}
+    </table>
+    <button class="btn block" style="margin-top:12px" onclick="impStockApply()">确认导入 ${uniq.length} 个商品的库存</button>
+    <div style="font-size:12px;line-height:1.7;color:var(--sub);margin-top:8px">只动库存，不改商品的价格、名称和分类。导错了可以在下面撤销。</div>`;
+}
+
+function impStockApply(){
+  if(!curStock||!curStock.recs.length){ toast('没有可导入的数据'); return; }
+  const wsel=document.getElementById('impWh');
+  const whId=wsel?wsel.value:(DB.warehouses[0]&&DB.warehouses[0].id);
+  const msel=document.getElementById('impStockMode');
+  const add=(msel?msel.value:'set')==='add';
+  if(!whId){ toast('没有可用的仓库'); return; }
+  /* 同名只留最后一行 */
+  const map={}, order=[];
+  curStock.recs.forEach(r=>{
+    if(map[r.name]==null){ map[r.name]=order.length; order.push(r); }
+    else order[map[r.name]]=r;
+  });
+  const batch={type:'stock', ts:Date.now(), file:curStock.fileName||'库存表', rows:curStock.recs.length,
+    wh:whId, add, items:[], undone:false};
+  let ng=0,nu=0;
+  order.forEach(r=>{
+    let g=DB.goods.find(x=>x.name===r.name);
+    if(!g){
+      let code='P'+(1000+DB.goods.length+1);
+      while(DB.goods.some(x=>x.code===code)) code='P'+(1001+DB.goods.length+Math.floor(Math.random()*900));
+      g={id:uid('g'), name:r.name, code, cat:'未分类', brand:'', barcode:'',
+         unit:r.unit||'个', spec:'', buy:0, sale:0, warn:0, note:'', stock:{}};
+      DB.warehouses.forEach(w=>{ g.stock[w.id]=0; });
+      DB.goods.push(g); ng++;
+      batch.items.push({id:g.id, isNew:true, wh:whId, prev:0, qty:r.qty});
+      g.stock[whId]=add?(+g.stock[whId]||0)+r.qty:r.qty;
+    } else {
+      if(!g.stock) g.stock={};
+      if(g.stock[whId]==null) g.stock[whId]=0;
+      const prev=+g.stock[whId]||0;
+      batch.items.push({id:g.id, isNew:false, wh:whId, prev, qty:r.qty});
+      g.stock[whId]=add?prev+r.qty:r.qty;
+      nu++;
+    }
+  });
+  if(!DB.impBatches) DB.impBatches=[];
+  DB.impBatches.unshift(batch);
+  if(DB.impBatches.length>12) DB.impBatches.length=12;
+  save();
+  curStock=null;
+  closeSheet();
+  if(typeof renderGoods==='function') renderGoods();
+  if(typeof renderStock==='function'){ try{ renderStock(); }catch(e){} }
+  toast('库存导入完成：更新 '+nu+' 个、新建 '+ng+' 个商品'+(add?'（累加模式）':'（覆盖模式）'),'long');
+}
+
+/* 同名商品如果按不同单位报价（比如「打包袋」有按包、有按个），
+   拆成两个商品：「打包袋（包）」「打包袋（个）」，而不是互相覆盖只剩一条。 */
+function planQuoteGoods(recs){
+  const unitsByName={};
+  recs.forEach(r=>{
+    if(!r.unit) return;
+    (unitsByName[r.name]=unitsByName[r.name]||{})[r.unit]=1;
+  });
+  const out=[], map={};
+  recs.forEach(r=>{
+    const us=unitsByName[r.name]?Object.keys(unitsByName[r.name]):[];
+    const split=us.length>1 && !!r.unit;
+    const name=split?(r.name+'（'+r.unit+'）'):r.name;
+    r._fn=name;
+    let p=map[name];
+    if(!p){ p=map[name]={name, raw:r.name, unit:r.unit||'', prices:{}, units:{}, n:0, split}; out.push(p); }
+    p.n++;
+    p.prices[r.price]=(p.prices[r.price]||0)+1;
+    if(r.unit) p.units[r.unit]=(p.units[r.unit]||0)+1;
+  });
+  out.forEach(p=>{ if(!p.unit) p.unit=modeOfNums(p.units)||''; });
+  return out;
 }
 
 function renderImpPreview(){
   const box=document.getElementById('impBox'); if(!box||!curImport) return;
   const recs=curImport.recs;
-  const custs=[], goods=[]; const cset={}, gset={};
-  recs.forEach(r=>{
-    if(!cset[r.cust]){ cset[r.cust]=1; custs.push(r.cust); }
-    if(!gset[r.name]){ gset[r.name]=1; goods.push(r.name); }
-  });
+  const plan=planQuoteGoods(recs);
+  const custs=[], cset={};
+  recs.forEach(r=>{ if(!cset[r.cust]){ cset[r.cust]=1; custs.push(r.cust); } });
+  const gset={}; plan.forEach(p=>gset[p.name]=1);
   const existC=DB.customers.filter(c=>cset[c.name]).length;
   const existG=DB.goods.filter(g=>gset[g.name]).length;
-  const uniqN=new Set(recs.map(r=>r.cust+'|'+r.name)).size;
+  const splitN=plan.filter(p=>p.split).length;
+  const uniqN=new Set(recs.map(r=>r.cust+'|'+(r._fn||r.name))).size;
   const dupN=recs.length-uniqN;
-  const sample=recs.slice(0,6).map(r=>
-    `<tr><td style="padding:4px 2px;border-bottom:1px solid var(--line)">${esc(r.cust)}</td><td style="border-bottom:1px solid var(--line)">${esc(r.name)}</td><td style="border-bottom:1px solid var(--line)">${r.price}${r.unit?'/'+esc(r.unit):''}</td></tr>`).join('');
+  const sample=recs.slice(0,6).map(r=>{
+    const fn=r._fn||r.name;
+    return `<tr><td style="padding:4px 2px;border-bottom:1px solid var(--line)">${esc(r.cust)}</td><td style="border-bottom:1px solid var(--line)">${esc(fn)}${fn!==r.name?' <span style="color:var(--sub)">拆</span>':''}</td><td style="border-bottom:1px solid var(--line)">${r.price}${r.unit?'/'+esc(r.unit):''}</td></tr>`;
+  }).join('');
   box.innerHTML=`
-    <div class="kv"><span class="k">识别到</span><span class="v">${recs.length} 条报价 · ${custs.length} 个客户 · ${goods.length} 个商品</span></div>
-    <div class="kv"><span class="k">会新建</span><span class="v">${custs.length-existC} 个客户 · ${goods.length-existG} 个商品</span></div>
+    <div class="kv"><span class="k">识别到</span><span class="v">${recs.length} 条报价 · ${custs.length} 个客户 · ${plan.length} 个商品</span></div>
+    <div class="kv"><span class="k">会新建</span><span class="v">${custs.length-existC} 个客户 · ${plan.length-existG} 个商品</span></div>
     <div class="kv"><span class="k">已存在</span><span class="v">${existC} 个客户 · ${existG} 个商品（直接复用，不重复建）</span></div>
-    ${dupN>0?`<div class="kv"><span class="k">重复行</span><span class="v">${dupN} 条（同一客户同一商品出现多次，只保留最后一条）</span></div>`:''}
+    ${splitN?`<div class="kv"><span class="k">按单位拆分</span><span class="v">${splitN} 个（同名不同单位，商品名后加了「（单位）」）</span></div>`:''}
+    ${dupN>0?`<div class="kv"><span class="k">重复行</span><span class="v">${dupN} 条（同一客户同一商品同一单位出现多次，只保留最后一条）</span></div>`:''}
     <div style="margin-top:8px;font-size:12px;color:var(--sub)">前几条预览：</div>
     <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:4px">
       <tr style="color:var(--sub)"><td style="padding:4px 2px">客户</td><td>商品</td><td>价格</td></tr>${sample}
@@ -2360,52 +2660,69 @@ function renderImpPreview(){
 function impApply(){
   if(!curImport||!curImport.recs.length){ toast('没有可导入的数据'); return; }
   const recs=curImport.recs;
-  const custs={}, goods={};
-  recs.forEach(r=>{
-    (custs[r.cust]=custs[r.cust]||[]).push(r);
-    const g=goods[r.name]=goods[r.name]||{prices:{},units:{}};
-    g.prices[r.price]=(g.prices[r.price]||0)+1;
-    if(r.unit) g.units[r.unit]=(g.units[r.unit]||0)+1;
-  });
+  const plan=planQuoteGoods(recs);
+  const custs={};
+  recs.forEach(r=>{ (custs[r.cust]=custs[r.cust]||[]).push(r); });
   let nc=0,ng=0;
   const custId={}, goodId={};
+  /* 批次记录：记下这次新建了哪些、动过哪些报价的旧值，事后可以整批撤回 */
+  const batch={ts:Date.now(), file:curImport.fileName||'报价表', rows:recs.length, custs:[], goods:[], memo:[], undone:false};
   Object.keys(custs).forEach(name=>{
     let c=DB.customers.find(x=>x.name===name);
-    if(!c){ c={id:uid('c'),name,contact:'',phone:'',addr:'',note:''}; DB.customers.push(c); nc++; }
+    if(!c){ c={id:uid('c'),name,contact:'',phone:'',addr:'',note:''}; DB.customers.push(c); nc++; batch.custs.push({id:c.id,name,isNew:true}); }
+    else batch.custs.push({id:c.id,name,isNew:false});
     custId[name]=c.id;
   });
   if(!DB.priceMemo) DB.priceMemo={};
   if(!DB.priceMemoTs) DB.priceMemoTs={};
   if(!DB.priceUnit) DB.priceUnit={};
-  Object.keys(goods).forEach(name=>{
-    const o=goods[name];
-    let g=DB.goods.find(x=>x.name===name);
+  plan.forEach(p=>{
+    let g=DB.goods.find(x=>x.name===p.name);
+    if(!g && p.split){
+      /* 以前只有一种单位时建过裸名商品，单位对得上就复用，不重复建 */
+      g=DB.goods.find(x=>x.name===p.raw && (x.unit||'')===p.unit);
+    }
     if(!g){
-      let unit=modeOfNums(o.units)||'个';
-      const mp=modeOfNums(o.prices);
+      const unit=p.unit||'个';
+      const mp=modeOfNums(p.prices);
       const sale=mp==null?0:parseFloat(mp);
       let code='P'+(1000+DB.goods.length+1);
       while(DB.goods.some(x=>x.code===code)) code='P'+(1001+DB.goods.length+Math.floor(Math.random()*900));
-      g={id:uid('g'), name, code, cat:'未分类', brand:'', barcode:'', unit, spec:'',
+      g={id:uid('g'), name:p.name, code, cat:'未分类', brand:'', barcode:'', unit, spec:'',
          buy:0, sale:isFinite(sale)?sale:0, warn:0, note:'', stock:{}};
       DB.warehouses.forEach(w=>g.stock[w.id]=0);
       DB.goods.push(g); ng++;
-    }
-    goodId[name]=g.id;
+      batch.goods.push({id:g.id,name:p.name,isNew:true});
+    }else batch.goods.push({id:g.id,name:g.name,isNew:false});
+    goodId[p.name]=g.id;
   });
   recs.forEach(r=>{
-    const k=memoKey('sale', custId[r.cust], goodId[r.name]);
+    const k=memoKey('sale', custId[r.cust], goodId[r._fn||r.name]);
+    if(!batch.memo.some(m=>m.k===k)){
+      batch.memo.push({
+        k,
+        has:Object.prototype.hasOwnProperty.call(DB.priceMemo,k), p:DB.priceMemo[k],
+        ts:DB.priceMemoTs[k],
+        hasU:Object.prototype.hasOwnProperty.call(DB.priceUnit,k), u:DB.priceUnit[k], n:r.name, c:r.cust
+      });
+    }
     DB.priceMemo[k]=r.price;
     DB.priceMemoTs[k]=Date.now();
     if(r.unit) DB.priceUnit[k]=r.unit; else delete DB.priceUnit[k];
   });
+  if(!DB.impBatches) DB.impBatches=[];
+  DB.impBatches.unshift(batch);
+  if(DB.impBatches.length>12) DB.impBatches.length=12;
   save();
   curImport=null;
   closeSheet();
   if(typeof renderGoods==='function') renderGoods();
-  const uniqN=new Set(recs.map(r=>r.cust+'|'+r.name)).size;
+  const uniqN=new Set(recs.map(r=>r.cust+'|'+(r._fn||r.name))).size;
+  const splitN=plan.filter(p=>p.split).length;
   toast('导入完成：新增 '+ng+' 个商品、'+nc+' 个客户，'+uniqN+' 条客户报价'
-    +(recs.length>uniqN?'（'+recs.length+' 行里 '+uniqN+' 条不同，其余重复已合并）':''),'long');
+    +(splitN?'（'+splitN+' 个同名不同单位已按单位拆开）':'')
+    +(recs.length>uniqN?'（'+recs.length+' 行里 '+uniqN+' 条不同，其余重复已合并）':'')
+    +'。导错了可在「批量导入」里点撤销','long');
 }
 /* 单据里当前选中的往来单位（支持直接输入的新名字，此时 id 为空） */
 function curPartner(){
@@ -3087,6 +3404,7 @@ function docLogo(){
   const co=DB.company||{};
   if(co.logo===null) return '';               // 明确选了「不用 LOGO」
   const src=co.logo||DEF_LOGO;
+  if(!src) return '';                          // 默认没有 LOGO，抬头只放公司名
   return `<img src="${src}" alt="" decoding="async">`;
 }
 function docLogoSvg(){ return docLogo(); }     // 兼容旧调用
@@ -3162,13 +3480,12 @@ function companyForm(){
   const c=DB.company||{};
   if(curLogo===undefined) curLogo=(c.logo!==undefined?c.logo:DEF_LOGO);
   return `<h3>公司信息 / LOGO<span class="x" onclick="closeSheet()">${ic('x')}</span></h3>
-  <div class="field"><label>公司 LOGO（打印在单据抬头，与公司名一起居中）</label>
+  <div class="field"><label>公司 LOGO（可选，默认不打印，抬头只放公司名）</label>
     <div class="logorow">
       <div class="logoprev" id="co_logoprev">${logoPrevHtml()}</div>
       <div class="imgbtns">
         <label class="btn ghost2 sm" style="cursor:pointer;text-align:center">上传图片<input type="file" accept="image/*" style="display:none" onchange="onLogoImg(this)"></label>
-        <button class="btn ghost2 sm" onclick="resetLogo()">恢复默认</button>
-        <button class="btn ghost2 sm" onclick="clearLogo()">不用 LOGO</button>
+        ${DEF_LOGO?'<button class="btn ghost2 sm" onclick="resetLogo()">恢复默认</button>':'<button class="btn ghost2 sm" onclick="clearLogo()">清除 LOGO</button>'}
       </div>
     </div>
     <div class="hint">建议用正方形、背景浅色的图；上传后自动裁成方形并转成黑白单色，打印干净、不费彩墨。</div>
@@ -3209,7 +3526,7 @@ function saveCompany(){
     sender:document.getElementById('co_sender').value.trim(),
     holder:document.getElementById('co_holder').value.trim(),
     card:document.getElementById('co_card').value.trim(),
-    /* 默认 LOGO 不落库（省 17KB 空间），用空串表示“跟随内置默认” */
+    /* 空串表示「没有 LOGO」，自定义图才落库，省空间 */
     logo:(curLogo===DEF_LOGO?'':curLogo)};
   curLogo=undefined;
   applyPage(); save(); closeSheet(); toast('已保存公司信息');
@@ -3219,6 +3536,7 @@ let curLogo;   // undefined=未改动 / ''=跟随内置 / null=不用 / dataURL=
 function logoPrevHtml(){
   if(curLogo===null) return '<span class="none">不用 LOGO</span>';
   const src=(curLogo===undefined?'':curLogo)||DEF_LOGO;
+  if(!src) return '<span class="none">默认无<br>可上传</span>';
   return '<img src="'+src+'" alt="">';
 }
 function paintLogoPrev(){
